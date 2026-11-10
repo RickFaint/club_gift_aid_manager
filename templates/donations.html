@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Donations · Club Gift Aid Manager{% endblock %}
+{% block content %}
+{# Donations are separate voluntary gifts, not deductions from reimbursements. #}
+<div class="page-heading">
+  <div><h1>Donations</h1><p>Voluntary donations are recorded independently from reimbursements.</p></div>
+  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#donation-modal"><span class="me-1">＋</span> Record donation</button>
+</div>
+<div class="alert alert-info mb-4">Donations remain separate from reimbursements. Linking records is for reconciliation only; a donation is never deducted from or required for a reimbursement.</div>
+{# The table shows active and dormant gifts, creator metadata, and edit controls. #}
+<div class="card">
+  <div class="table-toolbar">
+    <div><h2 class="h6 mb-1">Donation records</h2><span class="table-count">Review voluntary contributions received.</span></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search donations…" aria-label="Search donations" data-table-search="donations-table-body" /></div></div>
+  </div>
+  <div class="table-responsive"><table class="table table-hover align-middle">
+    <thead><tr><th>Person</th><th>Amount</th><th>Donation date</th><th>Received</th><th>Method</th><th>Reimbursement links</th><th>Gift Aid eligible</th><th>Status</th><th>Added by</th><th>Added at</th><th></th></tr></thead>
+    <tbody id="donations-table-body"></tbody>
+  </table></div>
+</div>
+{# Edit modal handles all donation fields and the logical active/dormant state. #}
+<div class="modal fade" id="donation-edit-modal" tabindex="-1" aria-labelledby="donation-edit-modal-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content">
+    <form id="donation-edit-form">
+      <input type="hidden" name="id" />
+      <div class="modal-header"><div><h2 class="modal-title fs-5" id="donation-edit-modal-title">Edit donation</h2><p class="text-muted small mb-0">Update the record or restore a dormant donation.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+      <div class="modal-body"><div class="row g-3">
+        <div class="col-md-6"><label class="form-label" for="donation-edit-person-select">Person</label><select class="form-select" name="person_id" id="donation-edit-person-select" required></select></div>
+        <div class="col-md-3"><label class="form-label" for="donation-edit-amount">Amount (pence)</label><input id="donation-edit-amount" class="form-control" type="number" name="amount_pence" min="1" step="1" required /></div>
+        <div class="col-md-3"><label class="form-label" for="donation-edit-date">Donation date</label><input id="donation-edit-date" class="form-control" type="date" name="donated_date" /></div>
+        <div class="col-md-4"><label class="form-label" for="donation-edit-method">Method</label><input id="donation-edit-method" class="form-control" name="method" /></div>
+        <div class="col-md-4"><label class="form-label" for="donation-edit-reference">Reference</label><input id="donation-edit-reference" class="form-control" name="reference" /></div>
+        <div class="col-md-4"><label class="form-label" for="donation-edit-received-date">Received date</label><input id="donation-edit-received-date" class="form-control" type="date" name="received_date" /></div>
+        <div class="col-md-6"><label class="form-label" for="donation-edit-bank-reference">Bank reference</label><input id="donation-edit-bank-reference" class="form-control" name="bank_reference" /></div>
+        <div class="col-md-6"><label class="form-label" for="donation-edit-declaration-select">Gift Aid declaration (optional)</label><select id="donation-edit-declaration-select" class="form-select" name="declaration_id"></select></div>
+        <div class="col-12"><label class="form-label" for="donation-edit-payment-select">Related reimbursement payments (optional)</label><select id="donation-edit-payment-select" class="form-select" name="linked_payment_ids" multiple size="4"></select><div class="form-text">Select one or more payments. Links are for reference only; the donation amount is not allocated or offset.</div></div>
+        <div class="col-12"><div class="form-check"><input class="form-check-input" type="checkbox" name="gift_aid_eligible" id="donation-edit-gift-aid-eligible" value="true" /><label class="form-check-label" for="donation-edit-gift-aid-eligible">Gift Aid eligible (verify declaration and donor eligibility)</label></div></div>
+        <div class="col-12"><div class="form-check"><input class="form-check-input" type="checkbox" name="active" id="donation-edit-active" value="true" /><label class="form-check-label" for="donation-edit-active">Active donation</label></div></div>
+      </div></div>
+      <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Save changes</button></div>
+    </form>
+  </div></div>
+</div>
+{# Add modal records a gift, with optional declaration and reconciliation links. #}
+<div class="modal fade" id="donation-modal" tabindex="-1" aria-labelledby="donation-modal-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content">
+    <form id="donation-form">
+      <div class="modal-header"><div><h2 class="modal-title fs-5" id="donation-modal-title">Record donation</h2><p class="text-muted small mb-0">Record a donation separately from any reimbursement payment.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+      <div class="modal-body"><div class="row g-3">
+        <div class="col-md-6"><label class="form-label" for="donation-person-select">Person</label><select class="form-select" name="person_id" id="donation-person-select" required></select></div>
+        <div class="col-md-3"><label class="form-label" for="donation-amount">Amount (pence)</label><input id="donation-amount" class="form-control" type="number" name="amount_pence" min="1" step="1" required /></div>
+        <div class="col-md-3"><label class="form-label" for="donation-date">Donation date</label><input id="donation-date" class="form-control" type="date" name="donated_date" /></div>
+        <div class="col-md-4"><label class="form-label" for="donation-method">Method</label><input id="donation-method" class="form-control" name="method" value="bank transfer" /></div>
+        <div class="col-md-4"><label class="form-label" for="donation-reference">Reference</label><input id="donation-reference" class="form-control" name="reference" /></div>
+        <div class="col-md-4"><label class="form-label" for="donation-received-date">Received date</label><input id="donation-received-date" class="form-control" type="date" name="received_date" /></div>
+        <div class="col-md-6"><label class="form-label" for="donation-bank-reference">Bank reference</label><input id="donation-bank-reference" class="form-control" name="bank_reference" /></div>
+        <div class="col-md-6"><label class="form-label" for="donation-declaration-select">Gift Aid declaration (optional)</label><select id="donation-declaration-select" class="form-select" name="declaration_id"><option value="">No declaration linked</option></select></div>
+        <div class="col-12"><label class="form-label" for="donation-payment-select">Related reimbursement payments (optional)</label><select id="donation-payment-select" class="form-select" name="linked_payment_ids" multiple size="4"></select><div class="form-text">Select one or more payments for reference. This does not allocate or reduce either amount.</div></div>
+        <div class="col-12"><div class="form-check"><input class="form-check-input" type="checkbox" name="gift_aid_eligible" id="gift-aid-eligible" value="true" /><label class="form-check-label" for="gift-aid-eligible">Gift Aid eligible (verify declaration and donor eligibility)</label></div></div>
+      </div></div>
+      <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Save donation</button></div>
+    </form>
+  </div></div>
+</div>
+{% endblock %}
+{% block page_instructions %}
+<p>Record voluntary donations separately from mileage reimbursements. Use the person, amount, and dates to identify the donation.</p>
+<ul class="mb-0"><li>Amounts are entered in pence.</li><li>Link a Gift Aid declaration only when appropriate and verify donor eligibility before marking a donation eligible.</li><li>A donation may be linked to multiple payments for reference. The full donation is not allocated to or offset against each payment.</li><li>Dormant donations are excluded from financial totals.</li></ul>
+{% endblock %}

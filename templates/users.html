@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}User accounts · Club Gift Aid Manager{% endblock %}
+{% block content %}
+{# The accounts page is available only to admins; server-side role checks remain authoritative. #}
+<div class="page-heading">
+  <div><h1>User accounts</h1><p>Manage logins and application roles.</p></div>
+  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#user-modal"><span class="me-1">＋</span> Create account</button>
+</div>
+{# Account listing excludes password hashes and is populated from the admin API. #}
+<div class="card">
+  <div class="table-toolbar">
+    <div><h2 class="h6 mb-1">Accounts</h2><span class="table-count">Review roles and linked people.</span></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search accounts…" aria-label="Search accounts" data-table-search="users-table-body" /></div></div>
+  </div>
+  <div class="table-responsive"><table class="table table-hover align-middle">
+    <thead><tr><th>Username</th><th>Role</th><th>Linked person</th><th>Status</th></tr></thead>
+    <tbody id="users-table-body"></tbody>
+  </table></div>
+</div>
+{# Account creation requires a long password and links volunteers to a person. #}
+<div class="modal fade" id="user-modal" tabindex="-1" aria-labelledby="user-modal-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content">
+    <form id="user-form">
+      <div class="modal-header"><div><h2 class="modal-title fs-5" id="user-modal-title">Create account</h2><p class="text-muted small mb-0">Create credentials and assign the appropriate access role.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+      <div class="modal-body"><div class="row g-3">
+        <div class="col-md-4"><label class="form-label" for="user-name">Username</label><input id="user-name" class="form-control" name="username" required autocomplete="username" /></div>
+        <div class="col-md-4"><label class="form-label" for="user-password">Temporary password (minimum 12 characters)</label><input id="user-password" class="form-control" type="password" name="password" minlength="12" required autocomplete="new-password" /></div>
+        <div class="col-md-4"><label class="form-label" for="user-role-select">Role</label><select class="form-select" name="role" id="user-role-select"><option value="volunteer">Volunteer</option><option value="treasurer">Treasurer</option><option value="admin">Admin</option></select></div>
+        <div class="col-md-6" id="user-person-field"><label class="form-label" for="user-person-select">Linked person (required for volunteers; used for treasurer trip entry)</label><select class="form-select" name="person_id" id="user-person-select"></select></div>
+      </div></div>
+      <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Create account</button></div>
+    </form>
+  </div></div>
+</div>
+{% endblock %}
+{% block page_instructions %}
+<p>Create accounts for people who need access to the application. Assign the least-privileged role that supports their work.</p>
+<ul class="mb-0"><li>Passwords must be at least 12 characters.</li><li>Volunteers must be linked to a person; treasurers may be linked to a person to enter trips for themselves.</li><li>Admins can enter trips for any person. Other roles can only enter trips for their linked person.</li></ul>
+{% endblock %}

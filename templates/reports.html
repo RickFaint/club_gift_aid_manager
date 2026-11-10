@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Reports · Club Gift Aid Manager{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><h1>Financial and mileage report</h1><p>Club-wide totals and a per-volunteer activity summary.</p></div>
+</div>
+<section class="row g-3 mb-4" aria-label="Club-wide financial totals">
+  <div class="col-sm-6 col-xl-4"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Expenses paid</div><div class="metric-value" id="report-expenses-paid">—</div><div class="metric-note">Recorded reimbursement payments</div></div></div></div>
+  <div class="col-sm-6 col-xl-4"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Donations</div><div class="metric-value" id="report-donations">—</div><div class="metric-note">Active donations</div></div></div></div>
+  <div class="col-sm-6 col-xl-4"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Gift Aid amount</div><div class="metric-value" id="report-gift-aid">—</div><div class="metric-note">25% of active donations marked eligible</div></div></div></div>
+</section>
+<div class="card">
+  <div class="table-toolbar flex-wrap">
+    <div><h2 class="h6 mb-1">Volunteer summary</h2><span class="table-count">Trip count, total recorded miles, payments, donations, and difference.</span></div>
+    <div><label class="form-label small mb-1" for="summary-volunteer-filter">Volunteer</label><select class="form-select form-select-sm" id="summary-volunteer-filter" data-summary-volunteer-filter><option value="">All volunteers</option></select></div>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover align-middle" id="financial-report-table">
+      <thead><tr><th>Volunteer</th><th class="text-end">Trips</th><th class="text-end">Total miles</th><th class="text-end">Expenses paid</th><th class="text-end">Donations</th><th class="text-end">Difference</th></tr></thead>
+      <tbody id="financial-report-table-body"><tr><td colspan="6" class="empty-state">Loading report…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="px-3 pb-2"><span class="form-text" id="summary-filter-status" aria-live="polite"></span></div>
+</div>
+{% for report in [
+  {
+    "key": "trips",
+    "title": "Trips",
+    "description": "Trip dates and recorded mileage",
+    "headers": ["Date", "Volunteer", "Origin", "Destination", "Tax year", "Vehicle", "Miles", "Status"],
+    "columns": 8
+  },
+  {
+    "key": "donations",
+    "title": "Donations",
+    "description": "Donation date, amounts, and Gift Aid eligibility",
+    "headers": ["Date", "Volunteer", "Amount", "Received", "Method", "Payment references", "Gift Aid eligible", "Status"],
+    "columns": 8
+  },
+  {
+    "key": "payments",
+    "title": "Payments",
+    "description": "Payment date, reimbursement, trips, and related donations",
+    "headers": ["Date", "Volunteer", "Amount paid", "Method", "Reference", "Trips covered", "Related donations (reference only)"],
+    "columns": 7
+  }
+] %}
+<section class="card mb-4" aria-labelledby="{{ report.key }}-report-title">
+  <div class="table-toolbar flex-wrap">
+    <div><h2 class="h6 mb-1" id="{{ report.key }}-report-title">{{ report.title }}</h2><span class="table-count">{{ report.description }}</span></div>
+    <div class="d-flex flex-wrap align-items-end gap-2">
+      <div><label class="form-label small mb-1" for="{{ report.key }}-person-filter">Volunteer</label><select class="form-select form-select-sm" id="{{ report.key }}-person-filter" data-report-filter="{{ report.key }}" data-filter-field="person"><option value="">All volunteers</option></select></div>
+      <div><label class="form-label small mb-1" for="{{ report.key }}-date-from">From</label><input class="form-control form-control-sm" type="date" id="{{ report.key }}-date-from" data-report-date-filter="{{ report.key }}" data-date-bound="from" /></div>
+      <div><label class="form-label small mb-1" for="{{ report.key }}-date-to">To</label><input class="form-control form-control-sm" type="date" id="{{ report.key }}-date-to" data-report-date-filter="{{ report.key }}" data-date-bound="to" /></div>
+      {% if report.key == "trips" %}
+      <div><label class="form-label small mb-1" for="trips-vehicle-filter">Vehicle</label><select class="form-select form-select-sm" id="trips-vehicle-filter" data-report-filter="trips" data-filter-field="vehicle"><option value="">All vehicles</option><option value="car">Car</option><option value="motorcycle">Motorcycle</option><option value="bicycle">Bicycle</option></select></div>
+      <div><label class="form-label small mb-1" for="trips-tax-year-filter">Tax year</label><select class="form-select form-select-sm" id="trips-tax-year-filter" data-report-filter="trips" data-filter-field="tax-year"><option value="">All tax years</option></select></div>
+      <div><label class="form-label small mb-1" for="trips-status-filter">Status</label><select class="form-select form-select-sm" id="trips-status-filter" data-report-filter="trips" data-filter-field="status"><option value="">All statuses</option><option value="submitted">Submitted</option><option value="approved">Approved</option><option value="rejected">Rejected</option><option value="paid">Paid</option></select></div>
+      {% elif report.key == "donations" %}
+      <div><label class="form-label small mb-1" for="donations-eligibility-filter">Gift Aid</label><select class="form-select form-select-sm" id="donations-eligibility-filter" data-report-filter="donations" data-filter-field="eligible"><option value="">All</option><option value="yes">Eligible</option><option value="no">Not eligible</option></select></div>
+      <div><label class="form-label small mb-1" for="donations-status-filter">Status</label><select class="form-select form-select-sm" id="donations-status-filter" data-report-filter="donations" data-filter-field="status"><option value="">All statuses</option><option value="active">Active</option><option value="dormant">Dormant</option></select></div>
+      <div><label class="form-label small mb-1" for="donations-method-filter">Method</label><select class="form-select form-select-sm" id="donations-method-filter" data-report-filter="donations" data-filter-field="method"><option value="">All methods</option></select></div>
+      {% elif report.key == "payments" %}
+      <div><label class="form-label small mb-1" for="payments-donations-filter">Related donations</label><select class="form-select form-select-sm" id="payments-donations-filter" data-report-filter="payments" data-filter-field="related-donations"><option value="">All payments</option><option value="yes">Has related donations</option><option value="no">No related donations</option></select></div>
+      <div><label class="form-label small mb-1" for="payments-method-filter">Method</label><select class="form-select form-select-sm" id="payments-method-filter" data-report-filter="payments" data-filter-field="method"><option value="">All methods</option></select></div>
+      {% endif %}
+      <button class="btn btn-outline-primary btn-sm" type="button" data-export-table="{{ report.key }}-report-table" data-export-filename="{{ report.key }}">Export CSV</button>
+    </div>
+  </div>
+  <div class="px-3"><span class="form-text" id="{{ report.key }}-filter-status" aria-live="polite"></span></div>
+  <div class="table-responsive">
+    <table class="table table-hover align-middle" id="{{ report.key }}-report-table">
+      <thead><tr>{% for header in report.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead>
+      <tbody id="{{ report.key }}-report-table-body"><tr><td colspan="{{ report.columns }}" class="empty-state" data-empty-row>Loading records…</td></tr></tbody>
+    </table>
+  </div>
+</section>
+{% endfor %}
+<p class="form-text mt-3">Difference is expenses paid minus donations for comparison only; donations are not offset against reimbursements. Totals include active donations only. Gift Aid is an estimate based on eligibility flags and is not a tax claim submission.</p>
+{% endblock %}
+{% block page_instructions %}
+<p>This report summarizes recorded reimbursement payments, active donations, estimated Gift Aid, and trip mileage by volunteer.</p>
+<ul class="mb-0"><li>Expenses paid are the total of payment records.</li><li>Gift Aid is estimated as 25% of active donations marked eligible.</li><li>Use the volunteer selector on each section. Trips can also be filtered by date, tax year, vehicle, and status; donations by date, Gift Aid eligibility, status, and method; and payments by date, related donations, and method.</li><li>Export CSV downloads only the rows currently visible in that table.</li><li>The financial total cards remain club-wide; the volunteer summary and detail tables can be filtered independently.</li><li>The volunteer difference is expenses paid minus donations and is informational only; it does not change either record.</li></ul>
+{% endblock %}

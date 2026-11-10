@@ -1,0 +1,6 @@
+# Flask serves the web application and its JSON endpoints.
+Flask==3.0.3
+# Pytest runs the isolated database and HTTP behavior regression suite.
+pytest==8.3.3
+# Pytest-Cov measures line and branch coverage during regression runs.
+pytest-cov>=5,<8

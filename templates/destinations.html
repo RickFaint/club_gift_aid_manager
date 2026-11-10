@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Locations · Club Gift Aid Manager{% endblock %}
+{% block content %}
+{# Location masterfile stores opponent grounds and the club's default origin. #}
+<div class="page-heading">
+  <div><h1>Locations</h1><p>Manage club grounds and opponent teams. Set one active location as the home ground.</p></div>
+  <div class="d-flex flex-wrap gap-2">
+    <button class="btn btn-outline-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#destination-import-modal">Upload CSV</button>
+    <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#destination-modal"><span class="me-1">＋</span> Add location</button>
+  </div>
+</div>
+<div class="modal fade" id="destination-import-modal" tabindex="-1" aria-labelledby="destination-import-title" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <form id="destination-import-form">
+        <div class="modal-header"><div><h2 class="modal-title fs-5" id="destination-import-title">Upload locations</h2><p class="text-muted small mb-0">Import multiple locations from a CSV file.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+        <div class="modal-body">
+          <label class="form-label" for="destination-csv-file">CSV file</label>
+          <input id="destination-csv-file" class="form-control" type="file" name="file" accept=".csv,text/csv" required />
+          <div class="form-text">Required column: <code>name</code>. Optional columns: <code>address</code>, <code>town_city</code>, <code>postcode</code>, <code>notes</code>, <code>home_ground</code> (yes/no). Later duplicate names in the CSV are skipped. No locations are imported if a row is invalid or a name already exists.</div>
+          <a class="small" href="{{ url_for('destinations_import_template') }}">Download CSV template</a>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Upload locations</button></div>
+      </form>
+    </div>
+  </div>
+</div>
+{# JavaScript fills this table and supplies edit/delete controls for staff. #}
+<div class="card">
+  <div class="table-toolbar">
+    <div><h2 class="h6 mb-1">Location directory</h2><span class="table-count" id="destinations-count-label">Loading records…</span></div>
+    <div class="table-search">
+      <div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search locations…" aria-label="Search locations" data-table-search="destinations-table-body" /></div>
+    </div>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th>Team / club</th><th>Ground address</th><th>Town / city</th><th>Postcode</th><th>Home ground</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
+      <tbody id="destinations-table-body"></tbody>
+    </table>
+  </div>
+</div>
+
+{# Add form; choosing home ground asks the server to move the single home flag. #}
+<div class="modal fade" id="destination-modal" tabindex="-1" aria-labelledby="destination-modal-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <form id="destination-form">
+        <div class="modal-header"><div><h2 class="modal-title fs-5" id="destination-modal-title">Add location</h2><p class="text-muted small mb-0">Add a ground for trip origins or destinations.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-6"><label class="form-label" for="destination-name">Team / club name</label><input id="destination-name" class="form-control" name="name" required /></div>
+            <div class="col-md-6"><label class="form-label" for="destination-address">Ground address</label><input id="destination-address" class="form-control" name="address" /></div>
+            <div class="col-md-4"><label class="form-label" for="destination-town">Town / city</label><input id="destination-town" class="form-control" name="town_city" /></div>
+            <div class="col-md-4"><label class="form-label" for="destination-postcode">Postcode</label><input id="destination-postcode" class="form-control" name="postcode" /></div>
+            <div class="col-md-4"><label class="form-label" for="destination-notes">Notes</label><input id="destination-notes" class="form-control" name="notes" /></div>
+            <div class="col-12"><div class="form-check"><input class="form-check-input" type="checkbox" name="home_ground" id="destination-home-ground" value="true" /><label class="form-check-label" for="destination-home-ground">Set as club home ground</label><div class="form-text">Selecting this replaces the currently flagged home ground.</div></div></div>
+          </div>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Save location</button></div>
+      </form>
+    </div>
+  </div>
+</div>
+{# Edit form can also deactivate a location without removing trip history. #}
+<div class="modal fade" id="destination-edit-modal" tabindex="-1" aria-labelledby="destination-edit-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <form id="destination-edit-form">
+        <input type="hidden" name="id" />
+        <div class="modal-header"><div><h2 class="modal-title fs-5" id="destination-edit-title">Edit location</h2><p class="text-muted small mb-0">Update ground details and availability.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-6"><label class="form-label">Team / club name</label><input class="form-control" name="name" required /></div>
+            <div class="col-md-6"><label class="form-label">Ground address</label><input class="form-control" name="address" /></div>
+            <div class="col-md-4"><label class="form-label">Town / city</label><input class="form-control" name="town_city" /></div>
+            <div class="col-md-4"><label class="form-label">Postcode</label><input class="form-control" name="postcode" /></div>
+            <div class="col-md-4"><label class="form-label">Notes</label><input class="form-control" name="notes" /></div>
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" name="home_ground" id="edit-destination-home-ground" /><label class="form-check-label" for="edit-destination-home-ground">Club home ground</label></div></div>
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" name="active" id="edit-destination-active" /><label class="form-check-label" for="edit-destination-active">Active for new trips</label></div></div>
+          </div>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Save changes</button></div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block page_instructions %}
+<p>Manage club grounds and opponent locations used when recording trips. Add locations individually or upload a CSV.</p>
+<ul class="mb-0"><li>Only active locations are available for new trips.</li><li>Set one active location as the home ground to make it the default trip origin.</li><li>Deactivate locations that are already used by trip records instead of deleting them.</li></ul>
+{% endblock %}

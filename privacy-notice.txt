@@ -1,0 +1,28 @@
+PRIVACY NOTICE TEMPLATE — COMPLETE AND REVIEW BEFORE USE
+
+Data controller
+[Club legal name] is responsible for the personal information described in this notice.
+Contact: [club postal address and privacy contact email/telephone].
+Data protection contact or representative (if applicable): [details].
+
+Information we use
+Depending on your relationship with the club, we may use contact details, account details, trip and mileage records, donation and reimbursement records, and Gift Aid declaration information. Please do not include unnecessary sensitive or confidential details in free-text notes.
+
+Why we use it and our lawful basis
+[Describe each purpose and the lawful basis the club has determined applies to it. Do not publish this notice until these details have been reviewed.]
+
+Who receives information
+Information is available to authorised club administrators and treasurers as needed for their duties. Location names and addresses may be sent to the configured geocoding and route calculation providers to calculate driving distances: [identify providers and provide links to their privacy information].
+Other recipients or service providers: [describe, or state none].
+
+How long we keep it
+[State the retention period or criteria for account, trip, payment, donation, Gift Aid, audit, and backup records. Explain when records are anonymised or erased.]
+
+Your rights
+Subject to applicable law, you may have rights to access, correct, erase, restrict, or object to the use of your personal information, and to receive or transfer certain information. To make a request, contact [privacy contact]. We may need to verify your identity and may retain records where required by law or needed for a legal claim.
+
+Complaints
+You may contact the Information Commissioner's Office (ICO) in the UK at https://ico.org.uk/make-a-complaint/ if you are unhappy with how your information is handled. You can also contact the club first using the details above.
+
+Security and changes
+The club takes appropriate steps to protect information and will update this notice when its processing changes. For questions or concerns, contact [privacy contact].

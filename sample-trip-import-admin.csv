@@ -1,0 +1,2 @@
+person_name,origin_id,destination_id,trip_date,vehicle_type,return_trip,passengers,declaration_accepted
+Replace with exact volunteer name,1,2,2026-10-12,car,yes,1,yes

@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}People · Club Gift Aid Manager{% endblock %}
+{% block content %}
+{# The directory is populated by the people API; volunteers see only themselves. #}
+<div class="page-heading">
+  <div><h1>People</h1><p>Manage volunteer, parent, coach, and contact records. Anonymizing a person removes identifying details but retains trip and financial history.</p></div>
+  {% if current_user.role in ('admin', 'treasurer') %}
+  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#person-modal"><span class="me-1">＋</span> Add person</button>
+  {% endif %}
+</div>
+{# Search filters the already-loaded rows in the browser. #}
+<div class="card">
+  <div class="table-toolbar">
+    <div><h2 class="h6 mb-1">People directory</h2><span class="table-count" id="people-count-label">Loading records…</span></div>
+    <div class="table-search">
+      <div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search people…" aria-label="Search people" data-table-search="people-table-body" /></div>
+    </div>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th>Name</th><th>Role</th><th>Email</th><th>Phone</th><th>Status</th>{% if current_user.role in ('admin','treasurer') %}<th class="text-end">Actions</th>{% endif %}</tr></thead>
+      <tbody id="people-table-body"></tbody>
+    </table>
+  </div>
+</div>
+
+{% if current_user.role in ('admin', 'treasurer') %}
+{# Staff-only modal posts new contact details to the people endpoint. #}
+<div class="modal fade" id="person-modal" tabindex="-1" aria-labelledby="person-modal-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <form id="person-form">
+        <div class="modal-header"><div><h2 class="modal-title fs-5" id="person-modal-title">Add person</h2><p class="text-muted small mb-0">Enter the contact details for this person.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-6"><label class="form-label" for="person-name">Name</label><input id="person-name" class="form-control" name="name" required /></div>
+            <div class="col-md-6"><label class="form-label" for="person-email">Email</label><input id="person-email" class="form-control" type="email" name="email" /></div>
+            <div class="col-md-4"><label class="form-label" for="person-phone">Phone</label><input id="person-phone" class="form-control" name="phone" /></div>
+            <div class="col-md-4"><label class="form-label" for="person-role">Role</label><select id="person-role" class="form-select" name="role"><option value="volunteer">Volunteer</option><option value="parent">Parent</option><option value="coach">Coach</option><option value="other">Other</option></select></div>
+            <div class="col-md-4"><label class="form-label" for="person-active">Status</label><select id="person-active" class="form-select" name="active"><option value="true">Active</option><option value="false">Inactive</option></select></div>
+            <div class="col-12"><label class="form-label" for="person-notes">Notes</label><textarea id="person-notes" class="form-control" name="notes" rows="2"></textarea></div>
+          </div>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Save person</button></div>
+      </form>
+    </div>
+  </div>
+</div>
+{# The edit modal reuses the same fields and adds a hidden record ID for PUT. #}
+<div class="modal fade" id="person-edit-modal" tabindex="-1" aria-labelledby="person-edit-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <form id="person-edit-form">
+        <input type="hidden" name="id" />
+        <div class="modal-header"><div><h2 class="modal-title fs-5" id="person-edit-title">Edit person</h2><p class="text-muted small mb-0">Update this person's details.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-6"><label class="form-label">Name</label><input class="form-control" name="name" required /></div>
+            <div class="col-md-6"><label class="form-label">Email</label><input class="form-control" type="email" name="email" /></div>
+            <div class="col-md-4"><label class="form-label">Phone</label><input class="form-control" name="phone" /></div>
+            <div class="col-md-4"><label class="form-label">Role</label><select class="form-select" name="role"><option value="volunteer">Volunteer</option><option value="parent">Parent</option><option value="coach">Coach</option><option value="other">Other</option></select></div>
+            <div class="col-md-4"><label class="form-label">Status</label><select class="form-select" name="active"><option value="true">Active</option><option value="false">Inactive</option></select></div>
+            <div class="col-12"><label class="form-label">Notes</label><textarea class="form-control" name="notes" rows="2"></textarea></div>
+          </div>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Save changes</button></div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+{% block page_instructions %}
+<p>Use the People directory to find club contacts and review their status. The search box filters the displayed records.</p>
+<p class="mb-0">Admins and treasurers can add, edit, or remove people. Volunteers can view only their own linked person record.</p>
+{% endblock %}

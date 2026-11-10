@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Audit log · Club Gift Aid Manager{% endblock %}
+{% block content %}
+{# Admin-only history shows actors and changed field names, never field values. #}
+<div class="page-heading">
+  <div><h1>Audit log</h1><p>Review who created, changed, deactivated, or removed application records.</p></div>
+</div>
+{# Recent events come from the bounded audit API and can be filtered locally. #}
+<div class="card">
+  <div class="table-toolbar">
+    <div><h2 class="h6 mb-1">Recent activity</h2><span class="table-count">The latest 500 events are shown.</span></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search audit log…" aria-label="Search audit log" data-table-search="audit-table-body" /></div></div>
+  </div>
+  <div class="table-responsive"><table class="table table-hover align-middle">
+    <thead><tr><th>Date and time</th><th>Actor</th><th>Action</th><th>Record type</th><th>Record ID</th><th>Changed fields</th></tr></thead>
+    <tbody id="audit-table-body"></tbody>
+  </table></div>
+</div>
+{% endblock %}
+{% block page_instructions %}
+<p>Review the latest 500 audited record changes. Each entry identifies who performed the action, the record involved, and which field names changed.</p>
+<p class="mb-0">The audit log does not show the old or new field values. Use the search box to filter the displayed events.</p>
+{% endblock %}

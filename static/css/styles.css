@@ -1,0 +1,511 @@
+/* Global design tokens and page defaults shared by every Bootstrap template. */
+:root {
+  /* Brand, text, border, and page-surface colors shared across components. */
+  --club-ink: #1d2939;
+  --club-muted: #667085;
+  --club-green: #17845b;
+  --club-green-dark: #116b49;
+  --club-border: #e4e9ef;
+  --club-canvas: #f5f7fa;
+}
+
+body {
+  min-height: 100vh;
+  background: var(--club-canvas);
+  color: var(--club-ink);
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+}
+
+.app-container {
+  max-width: 1440px;
+}
+
+/* Top navigation, brand mark, active page link, and signed-in account details. */
+.app-navbar {
+  min-height: 70px;
+  background: #fff;
+  border-bottom: 1px solid var(--club-border);
+  box-shadow: 0 2px 8px rgba(16, 24, 40, 0.035);
+}
+
+.navbar-brand {
+  color: var(--club-ink);
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+}
+
+.navbar-brand:hover {
+  color: var(--club-green-dark);
+}
+
+.brand-mark {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 11px;
+  background: var(--club-green);
+  color: #fff;
+  font-size: 1.1rem;
+  font-weight: 800;
+}
+
+.brand-light {
+  color: #667085;
+  font-weight: 500;
+}
+
+.app-navbar .nav-link {
+  margin: 0 0.12rem;
+  padding: 0.55rem 0.75rem !important;
+  border-radius: 0.5rem;
+  color: #586474;
+  font-size: 0.91rem;
+  font-weight: 550;
+}
+
+.app-navbar .nav-link:hover,
+.app-navbar .nav-link.active {
+  background: #eaf5ef;
+  color: var(--club-green-dark);
+}
+
+.account-menu {
+  color: var(--club-ink);
+}
+
+.account-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.role-pill {
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  background: #eef2f6;
+  color: #566273;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+/* Page titles and dashboard-specific headings/metrics. */
+.page-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 1rem;
+  margin-bottom: 1.6rem;
+}
+
+.page-heading h1 {
+  margin-bottom: 0.35rem;
+  color: var(--club-ink);
+  font-size: clamp(1.55rem, 3vw, 2rem);
+  font-weight: 700;
+  letter-spacing: -0.035em;
+}
+
+.page-heading p {
+  margin-bottom: 0;
+  color: var(--club-muted) !important;
+}
+
+.page-help-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.75rem;
+}
+
+.privacy-notice-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: inherit;
+  font: inherit;
+}
+
+.form-label {
+  display: inline-block;
+}
+
+.field-help-button {
+  margin: 0 0.25rem 0.25rem;
+  padding: 0.05rem 0.38rem;
+  border-radius: 50%;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  vertical-align: middle;
+}
+
+.field-help-button:focus-visible {
+  outline: 2px solid var(--club-green);
+  outline-offset: 2px;
+}
+
+.eyebrow {
+  color: var(--club-green);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+}
+
+.metric-card .card-body {
+  padding: 1.25rem 1.35rem;
+}
+
+.metric-label {
+  color: #667085;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.metric-value {
+  margin: 0.3rem 0 0.1rem;
+  color: var(--club-ink);
+  font-size: 1.8rem;
+  font-weight: 720;
+  letter-spacing: -0.04em;
+}
+
+.metric-note {
+  color: #98a2b3;
+  font-size: 0.78rem;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 2rem 0 1rem;
+}
+
+/* Role-specific welcome panel and dashboard navigation cards. */
+.volunteer-welcome .card-body {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.25rem;
+}
+
+.welcome-icon,
+.dashboard-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 12px;
+  background: #eaf5ef;
+  color: var(--club-green-dark);
+  font-weight: 750;
+}
+
+.dashboard-link .card-body {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.dashboard-link h3 {
+  margin-bottom: 0.25rem;
+  font-size: 0.98rem;
+  font-weight: 650;
+}
+
+.dashboard-link p {
+  margin-bottom: 0;
+  font-size: 0.84rem;
+}
+
+.dashboard-arrow {
+  margin-left: auto;
+  color: #98a2b3;
+  font-size: 1.15rem;
+}
+
+/* Shared card surfaces and accessible form-control styling layered over Bootstrap. */
+.card {
+  overflow: hidden;
+  border: 1px solid var(--club-border);
+  border-radius: 0.85rem;
+  background: #fff;
+  box-shadow: 0 3px 12px rgba(16, 24, 40, 0.035);
+}
+
+.card-header {
+  min-height: 60px;
+  border-bottom: 1px solid var(--club-border);
+  background: #fff;
+  color: var(--club-ink);
+}
+
+.card-header h2,
+.card-header h3 {
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.form-control,
+.form-select {
+  min-height: 42px;
+  border-color: #d7dee7;
+  border-radius: 0.55rem;
+  color: var(--club-ink);
+}
+
+textarea.form-control {
+  min-height: auto;
+}
+
+.form-control:focus,
+.form-select:focus {
+  border-color: #62af8e;
+  box-shadow: 0 0 0 0.2rem rgba(23, 132, 91, 0.13);
+}
+
+.form-label {
+  color: #344054;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.form-text {
+  color: var(--club-muted);
+}
+
+.btn {
+  border-radius: 0.55rem;
+  font-weight: 600;
+}
+
+.btn-primary {
+  border-color: var(--club-green);
+  background: var(--club-green);
+}
+
+.btn-primary:hover,
+.btn-primary:focus {
+  border-color: var(--club-green-dark);
+  background: var(--club-green-dark);
+}
+
+.btn-success {
+  border-color: var(--club-green);
+  background: var(--club-green);
+}
+
+/* Data-table typography, spacing, toolbars, counts, and search controls. */
+.table {
+  --bs-table-hover-bg: #f7faf8;
+  margin-bottom: 0;
+  color: #344054;
+}
+
+.table thead th {
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--club-border);
+  background: #f8fafc;
+  color: #667085;
+  font-size: 0.73rem;
+  font-weight: 700;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.table tbody td {
+  padding: 0.9rem 1rem;
+  border-color: #edf0f3;
+  font-size: 0.9rem;
+  vertical-align: middle;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--club-border);
+  background: #fff;
+}
+
+.table-search {
+  max-width: 300px;
+}
+
+.table-search .form-control {
+  min-height: 38px;
+  padding-left: 2.2rem;
+  background: #fbfcfd;
+}
+
+.table-search-wrap {
+  position: relative;
+}
+
+.table-search-icon {
+  position: absolute;
+  top: 50%;
+  left: 0.75rem;
+  color: #98a2b3;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.table-count {
+  color: var(--club-muted);
+  font-size: 0.84rem;
+}
+
+.dashboard-link {
+  height: 100%;
+  border: 1px solid var(--club-border);
+  border-radius: 0.85rem;
+  color: var(--club-ink);
+  transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+}
+
+.dashboard-link:hover {
+  transform: translateY(-2px);
+  border-color: #b6d9c8;
+  box-shadow: 0 0.75rem 1.5rem rgba(16, 24, 40, 0.08);
+  color: var(--club-ink);
+}
+
+.dashboard-link .card-body {
+  padding: 1.15rem 1.25rem;
+}
+
+/* Modal and sign-in surfaces use the same brand palette as the main workspace. */
+.modal-content {
+  overflow: hidden;
+  border: 0;
+  border-radius: 0.9rem;
+  box-shadow: 0 1.5rem 4rem rgba(16, 24, 40, 0.2);
+}
+
+.login-page {
+  background:
+    radial-gradient(ellipse at 12% 18%, rgba(23, 132, 91, 0.12), transparent 34%),
+    radial-gradient(ellipse at 90% 85%, rgba(52, 94, 75, 0.08), transparent 30%),
+    #f5f7fa;
+}
+
+.login-card {
+  width: min(100%, 450px);
+  padding: clamp(1.5rem, 5vw, 2.5rem);
+  border: 1px solid var(--club-border);
+  border-radius: 1rem;
+  background: #fff;
+  box-shadow: 0 1.5rem 4rem rgba(16, 24, 40, 0.1);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin-bottom: 2.5rem;
+  color: var(--club-ink);
+}
+
+.login-footnote {
+  margin-top: 1.5rem;
+  color: #98a2b3;
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+/* Consistent modal padding and boundaries. */
+.modal-header {
+  padding: 1.25rem 1.5rem;
+  border-bottom-color: var(--club-border);
+}
+
+.modal-body {
+  padding: 1.5rem;
+}
+
+.modal-footer {
+  padding: 1rem 1.5rem;
+  border-top-color: var(--club-border);
+  background: #fbfcfd;
+}
+
+/* State chips and empty-result messages distinguish active, dormant, and no-data rows. */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  background: #eaf7f0;
+  color: #18764f;
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.status-badge.inactive {
+  background: #f1f3f5;
+  color: #667085;
+}
+
+.empty-state {
+  padding: 2.75rem 1rem !important;
+  color: var(--club-muted) !important;
+  text-align: center;
+}
+
+.alert {
+  border: 0;
+  border-radius: 0.75rem;
+}
+
+/* Tablet and phone adjustments preserve usable navigation and searchable tables. */
+@media (max-width: 991.98px) {
+  .app-navbar .navbar-collapse {
+    padding: 0.75rem 0;
+  }
+
+  .account-menu {
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--club-border);
+  }
+}
+
+@media (max-width: 575.98px) {
+  main.app-container {
+    padding-top: 1.5rem !important;
+  }
+
+  .page-heading {
+    align-items: flex-start;
+  }
+
+  .table-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .table-search {
+    max-width: none;
+  }
+
+  .page-heading {
+    flex-direction: column;
+  }
+
+  .volunteer-welcome .card-body {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .volunteer-welcome .btn {
+    margin-left: 3.25rem !important;
+  }
+}

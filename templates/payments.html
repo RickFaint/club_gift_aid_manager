@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Payments · Club Gift Aid Manager{% endblock %}
+{% block content %}
+{# Payments record completed reimbursements and display a separate reconciliation. #}
+<div class="page-heading">
+  <div><h1>Payments</h1><p>Mileage reimbursements paid to volunteers, separate from donations.</p></div>
+  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#payment-modal"><span class="me-1">＋</span> Record payment</button>
+</div>
+{# This report compares payments with donations explicitly linked for tracking. #}
+<div class="card mb-4">
+  <div class="table-toolbar">
+    <div><h2 class="h6 mb-1">Volunteer reconciliation</h2><span class="table-count">Payments compared with linked donations; each donation counts once per person.</span></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search volunteers…" aria-label="Search volunteer reconciliation" data-table-search="reconciliation-table-body" /></div></div>
+  </div>
+  <div class="table-responsive"><table class="table table-hover align-middle">
+    <thead><tr><th>Volunteer</th><th>Payments</th><th>Donations linked back</th><th>Difference</th><th>Records</th></tr></thead>
+    <tbody id="reconciliation-table-body"></tbody>
+  </table></div>
+</div>
+{# Each payment row also names the trip records covered by that payment. #}
+<div class="card">
+  <div class="table-toolbar">
+    <div><h2 class="h6 mb-1">Reimbursement payments</h2><span class="table-count">Payments made to volunteers.</span></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search payments…" aria-label="Search payments" data-table-search="payments-table-body" /></div></div>
+  </div>
+  <div class="table-responsive"><table class="table table-hover align-middle">
+    <thead><tr><th>Person</th><th>Reimbursement paid</th><th>Paid date</th><th>Method</th><th>Reference</th><th>Trips reimbursed</th><th>Related donations (reference only)</th></tr></thead>
+    <tbody id="payments-table-body"></tbody>
+  </table></div>
+</div>
+{# Select one or more unpaid trips; JavaScript calculates the full total. #}
+<div class="modal fade" id="payment-modal" tabindex="-1" aria-labelledby="payment-modal-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content">
+    <form id="payment-form">
+      <div class="modal-header"><div><h2 class="modal-title fs-5" id="payment-modal-title">Record reimbursement payment</h2><p class="text-muted small mb-0">Enter the amount and payment details.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+      <div class="modal-body"><div class="row g-3">
+        <div class="col-md-6"><label class="form-label" for="payment-person-select">Person</label><select class="form-select" name="person_id" id="payment-person-select" required></select></div>
+        <div class="col-12"><label class="form-label" for="payment-trip-select">Trips reimbursed</label><select class="form-select" name="trip_ids" id="payment-trip-select" multiple size="5" aria-describedby="payment-trip-help"></select><div class="form-text" id="payment-trip-help">Select one or more unpaid trips for this person. A trip can only be linked to one payment.</div></div>
+        <div class="col-md-3"><label class="form-label" for="payment-amount">Amount (pence)</label><input id="payment-amount" class="form-control" type="number" name="amount_pence" min="1" step="1" required /><div class="form-text">Automatically set to the total of selected trips.</div></div>
+        <div class="col-md-3"><label class="form-label" for="payment-date">Paid date</label><input id="payment-date" class="form-control" type="date" name="paid_date" /></div>
+        <div class="col-md-6"><label class="form-label" for="payment-method">Method</label><select id="payment-method" class="form-select" name="method"><option>bank transfer</option><option>cash</option><option>cheque</option></select></div>
+        <div class="col-md-6"><label class="form-label" for="payment-reference">Reference</label><input id="payment-reference" class="form-control" name="reference" /></div>
+      </div></div>
+      <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Save payment</button></div>
+    </form>
+  </div></div>
+</div>
+{% endblock %}
+{% block page_instructions %}
+<p>Record completed mileage reimbursements and review reconciliation. Donations and reimbursements remain separate records.</p>
+<ul class="mb-0"><li>Select a person to see their unpaid trips.</li><li>Selected trips determine the full reimbursement amount; a trip can be included in only one payment.</li><li>A donation may be linked to multiple payments as a reference. It is not allocated or deducted from any payment, and counts once in person-level reconciliation.</li></ul>
+{% endblock %}
