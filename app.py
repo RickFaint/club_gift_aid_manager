@@ -31,6 +31,7 @@ from club_gift_aid_manager.db import (
     create_donation,
     create_payment,
     create_person,
+    create_rate_schedule,
     create_trip,
     create_trips,
     create_user,
@@ -42,6 +43,9 @@ from club_gift_aid_manager.db import (
     get_destination,
     get_declaration,
     get_financial_report,
+    get_dashboard_checks,
+    get_person_dashboard,
+    get_rate_schedule_for_date,
     get_summary,
     get_trip,
     get_user_by_id,
@@ -53,6 +57,7 @@ from club_gift_aid_manager.db import (
     list_payment_reconciliation,
     list_payments,
     list_people,
+    list_rate_schedules,
     list_trips,
     list_users,
     record_audit_event,
@@ -63,7 +68,12 @@ from club_gift_aid_manager.db import (
     update_trip,
     update_user,
 )
-from club_gift_aid_manager.services import calculate_tax_year, calculate_trip_amounts, validate_declaration
+from club_gift_aid_manager.services import (
+    calculate_tax_year,
+    calculate_trip_amounts,
+    rate_schedule_to_bands,
+    validate_declaration,
+)
 from club_gift_aid_manager.routing import RouteLookupError, calculate_route_distance
 
 # Cookie/session and upload-size defaults are centralized here. Production
@@ -203,6 +213,8 @@ def enforce_security():
     """
     html_endpoints = {
         "index",
+        "how_it_works_page",
+        "mileage_rates_page",
         "people_page",
         "trips_page",
         "destinations_page",
@@ -348,6 +360,20 @@ def privacy_notice_upload():
 def index():
     """Render the role-aware dashboard shell."""
     return render_template("index.html")
+
+
+@app.get("/how-it-works")
+@roles_required("admin", "treasurer", "volunteer")
+def how_it_works_page():
+    """Render the role-specific application guides."""
+    return render_template("how_it_works.html")
+
+
+@app.get("/mileage-rates/page")
+@roles_required("admin")
+def mileage_rates_page():
+    """Render the administrator-only effective mileage rate schedule."""
+    return render_template("mileage_rates.html")
 
 
 @app.get("/people/page")
@@ -503,6 +529,8 @@ def calculate_route():
     round_trip = str(payload.get("return_trip", "false")).lower() in {"true", "1", "yes"}
     passengers = int(payload.get("passengers", 0) or 0)
     vehicle_type = payload.get("vehicle_type", "car")
+    # Use the journey date, not the current date or the date the claim is entered.
+    rate_schedule = get_rate_schedule_for_date(trip_date)
     result = calculate_trip_amounts(
         vehicle_type=vehicle_type,
         trip_date=trip_date,
@@ -511,7 +539,9 @@ def calculate_route():
         passengers=passengers,
         total_business_miles=0.0,
         other_org_miles=0.0,
+        rate_bands=rate_schedule_to_bands(rate_schedule),
     )
+    result["rate_effective_from"] = rate_schedule["effective_from"]
     return jsonify(result)
 
 
@@ -1234,6 +1264,54 @@ def payments_index():
     return jsonify({"items": list_payments(person_id)})
 
 
+@app.get("/admin/mileage-rates")
+@roles_required("admin")
+def mileage_rates_index():
+    """Return all effective mileage rate schedules for administrators."""
+    return jsonify({"items": list_rate_schedules()})
+
+
+@app.post("/admin/mileage-rates")
+@roles_required("admin")
+def mileage_rates_create():
+    """Add and audit a complete dated schedule without changing prior entries."""
+    payload = get_payload()
+    required = (
+        "effective_from",
+        "car_first_10000_pence",
+        "car_over_10000_pence",
+        "motorcycle_pence",
+        "bicycle_pence",
+        "passenger_pence",
+    )
+    # A schedule is an atomic set: partial updates cannot mix old and new rates.
+    missing = [field for field in required if payload.get(field) in (None, "")]
+    if missing:
+        return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
+    try:
+        rates = {
+            field: int(payload[field])
+            for field in required[1:]
+        }
+        if any(str(payload[field]).strip() != str(rates[field]) for field in required[1:]):
+            raise ValueError("Rates must be entered as whole pence amounts.")
+        schedule = create_rate_schedule(
+            effective_from=str(payload["effective_from"]),
+            **rates,
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "A rate schedule already exists for that effective date."}), 409
+    audit_change(
+        "created",
+        "mileage_rate_schedule",
+        schedule["effective_from"],
+        required,
+    )
+    return jsonify(schedule), 201
+
+
 @app.post("/payments")
 @roles_required("admin", "treasurer")
 def payments_create():
@@ -1271,6 +1349,19 @@ def payments_create():
 def reports_summary():
     """Return high-level dashboard counters and financial totals."""
     return jsonify(get_summary())
+
+
+@app.get("/dashboard/overview")
+@roles_required("admin", "treasurer", "volunteer")
+def dashboard_overview():
+    """Return dashboard prompts scoped to the signed-in user's role."""
+    if g.current_user["role"] == "volunteer":
+        return jsonify(get_person_dashboard(g.current_user["person_id"]))
+
+    overview = get_dashboard_checks()
+    if g.current_user["role"] == "admin":
+        overview["recent_activity"] = list_audit_events(limit=5)
+    return jsonify(overview)
 
 
 @app.get("/reports/payment-reconciliation")

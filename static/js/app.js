@@ -170,6 +170,156 @@ function renderSummary(summary) {
   });
 }
 
+/** Render role-scoped dashboard reminders without exposing staff data to volunteers. */
+function renderDashboardOverview(overview) {
+  const actions = document.getElementById('dashboard-next-steps');
+  if (actions) {
+    if (window.APP_ROLE === 'volunteer') {
+      const recentTrips = overview.recent_trips || [];
+      const recentList = recentTrips.length
+        ? `<ul class="dashboard-recent-list mb-0">${recentTrips.map((trip) => `
+            <li><span>${dateLabel(trip.trip_date)} · ${escapeHtml(trip.destination_name || 'Destination not recorded')}</span><span class="status-badge">${escapeHtml(trip.status || 'submitted')}</span></li>
+          `).join('')}</ul>`
+        : '<p class="text-muted mb-0">No trips have been submitted yet.</p>';
+      actions.innerHTML = `
+        <div class="col-12 col-md-8 col-xl-6">
+          <article class="card dashboard-action-card h-100">
+            <div class="card-body">
+              <div class="metric-label">Your trip history</div>
+              <div class="metric-value">${Number(overview.trip_count) || 0}</div>
+              <div class="metric-note mb-3">Trips linked to your account</div>
+              ${recentList}
+              <a class="btn btn-outline-primary btn-sm mt-3" href="/trips/page">View my trips</a>
+            </div>
+          </article>
+        </div>`;
+      return;
+    }
+
+    // Staff reminders are informational links, not approvals or tax eligibility decisions.
+    const reminders = [];
+    if (overview.trips_without_payment > 0) {
+      reminders.push({
+        title: 'Trips without a recorded reimbursement',
+        detail: `${overview.trips_without_payment} trip${overview.trips_without_payment === 1 ? ' has' : 's have'} no payment linked in this app.`,
+        href: '/payments/page',
+        link: 'Review payments',
+      });
+    }
+    if (overview.eligible_donations_without_active_declaration > 0) {
+      reminders.push({
+        title: 'Check Gift Aid declaration links',
+        detail: `${overview.eligible_donations_without_active_declaration} active donation${overview.eligible_donations_without_active_declaration === 1 ? '' : 's'} marked eligible have no active, unwithdrawn declaration linked.`,
+        href: '/donations/page',
+        link: 'Review donations',
+      });
+    }
+    if (!overview.has_active_home_ground) {
+      reminders.push({
+        title: 'Set the club home ground',
+        detail: 'No active location is marked as the default trip origin.',
+        href: '/destinations/page',
+        link: 'Review locations',
+      });
+    }
+    actions.innerHTML = reminders.length
+      ? reminders.map((reminder) => `
+          <div class="col-12 col-md-6 col-xl-4">
+            <article class="card dashboard-action-card h-100">
+              <div class="card-body d-flex flex-column">
+                <h3 class="h6">${escapeHtml(reminder.title)}</h3>
+                <p class="text-muted small">${escapeHtml(reminder.detail)}</p>
+                <a class="btn btn-outline-primary btn-sm mt-auto align-self-start" href="${reminder.href}">${escapeHtml(reminder.link)}</a>
+              </div>
+            </article>
+          </div>`).join('')
+      : '<div class="col-12"><div class="alert alert-success mb-0" role="status">No reminders from these dashboard checks. Continue recording activity and review the relevant records regularly.</div></div>';
+  }
+
+  const activity = document.getElementById('dashboard-recent-activity');
+  if (!activity) return;
+  const events = overview.recent_activity || [];
+  activity.innerHTML = events.length
+    ? events.map((event) => `
+        <li class="dashboard-activity-item">
+          <span><strong>${escapeHtml(event.actor_username || 'Unknown user')}</strong> ${escapeHtml(event.action)} ${escapeHtml(event.entity_type)} #${escapeHtml(event.entity_id)}</span>
+          <time>${escapeHtml(event.occurred_at || '')}</time>
+        </li>`).join('')
+    : '<li class="text-muted">No audited activity has been recorded yet.</li>';
+}
+
+/** Render immutable, complete rate schedules with their derived end dates. */
+function renderMileageRateSchedules(schedules) {
+  const body = document.getElementById('mileage-rate-table-body');
+  if (!body) return;
+  const count = document.getElementById('mileage-rate-count');
+  if (count) count.textContent = `${schedules.length} schedule${schedules.length === 1 ? '' : 's'}`;
+  // The backend derives each end date from the next schedule without rewriting history.
+  body.innerHTML = schedules.length
+    ? schedules.map((schedule, index) => {
+      const start = index === 0 && schedule.effective_from === '0001-01-01'
+        ? 'Original app rates'
+        : dateLabel(schedule.effective_from);
+      const period = schedule.effective_to
+        ? `${start} – ${dateLabel(schedule.effective_to)}`
+        : `${start} – Ongoing`;
+      return `<tr>
+        <td>${escapeHtml(period)}</td>
+        <td>${Number(schedule.car_first_10000_pence)}p</td>
+        <td>${Number(schedule.car_over_10000_pence)}p</td>
+        <td>${Number(schedule.motorcycle_pence)}p</td>
+        <td>${Number(schedule.bicycle_pence)}p</td>
+        <td>${Number(schedule.passenger_pence)}p</td>
+      </tr>`;
+    }).join('')
+    : '<tr><td colspan="6" class="empty-state">No rate schedules have been configured.</td></tr>';
+}
+
+/** Load the effective-date rate history for the administrator page. */
+async function loadMileageRateSchedules() {
+  const data = await api('/admin/mileage-rates');
+  renderMileageRateSchedules(data.items || []);
+}
+
+/** Save one complete rate schedule and refresh its derived effective periods. */
+function attachMileageRateForm() {
+  const form = document.getElementById('mileage-rate-form');
+  const message = document.getElementById('mileage-rate-message');
+  if (!form || !message) return;
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    message.hidden = true;
+    message.classList.remove('alert-danger', 'alert-success');
+    const formData = new FormData(form);
+    // Number inputs are sent as JSON integers to match the server's whole-pence contract.
+    const payload = Object.fromEntries(formData.entries());
+    [
+      'car_first_10000_pence',
+      'car_over_10000_pence',
+      'motorcycle_pence',
+      'bicycle_pence',
+      'passenger_pence',
+    ].forEach((field) => {
+      payload[field] = Number(payload[field]);
+    });
+    try {
+      await api('/admin/mileage-rates', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      form.reset();
+      message.textContent = 'Rate schedule saved. Trips will use this schedule according to their occurrence date.';
+      message.classList.add('alert-success');
+      message.hidden = false;
+      await loadMileageRateSchedules();
+    } catch (error) {
+      message.textContent = error.message || 'Unable to save rate schedule.';
+      message.classList.add('alert-danger');
+      message.hidden = false;
+    }
+  });
+}
+
 /** Reuse the loaded people list to populate person pickers on this page. */
 function fillPersonSelects() {
   const options = state.people
@@ -892,10 +1042,14 @@ function applyTableSearch(tableBodyId) {
 async function refreshPageData() {
   const page = document.body.dataset.page;
   await loadPeople();
+  if (page === 'mileage_rates_page') return loadMileageRateSchedules();
   if (page === 'index') {
-    if (window.APP_ROLE === 'volunteer') return;
-    const summary = await api('/reports/summary');
-    renderSummary(summary);
+    if (window.APP_ROLE !== 'volunteer') {
+      const summary = await api('/reports/summary');
+      renderSummary(summary);
+    }
+    const overview = await api('/dashboard/overview');
+    renderDashboardOverview(overview);
     return;
   }
   if (page === 'destinations_page') return loadDestinations();
@@ -986,6 +1140,7 @@ async function removeRecord(path, message) {
 
 // Wire form submission and delegated table actions once the page markup exists.
 document.addEventListener('DOMContentLoaded', async () => {
+  attachMileageRateForm();
   attachForm('person-form', '/people');
   attachUpdateForm('person-edit-form', '/people');
   attachForm('destination-form', '/destinations');

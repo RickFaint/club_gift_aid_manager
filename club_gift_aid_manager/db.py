@@ -11,13 +11,19 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
 from werkzeug.security import generate_password_hash
 
-from .services import calculate_tax_year, calculate_trip_amounts, validate_declaration
+from .services import (
+    BASE_RATE_BANDS,
+    calculate_tax_year,
+    calculate_trip_amounts,
+    rate_schedule_to_bands,
+    validate_declaration,
+)
 
 DB_PATH = Path(os.environ.get(
     "CLUB_GIFT_AID_DB",
@@ -96,6 +102,18 @@ def create_app_database() -> None:
                 home_ground INTEGER NOT NULL DEFAULT 0,
                 latitude REAL,
                 longitude REAL
+            );
+
+            -- Complete mileage rate schedules. Period end dates are derived from
+            -- the next effective date, so historical schedules remain intact.
+            CREATE TABLE IF NOT EXISTS mileage_rate_schedules (
+                effective_from TEXT PRIMARY KEY,
+                car_first_10000_pence INTEGER NOT NULL CHECK(car_first_10000_pence >= 0),
+                car_over_10000_pence INTEGER NOT NULL CHECK(car_over_10000_pence >= 0),
+                motorcycle_pence INTEGER NOT NULL CHECK(motorcycle_pence >= 0),
+                bicycle_pence INTEGER NOT NULL CHECK(bicycle_pence >= 0),
+                passenger_pence INTEGER NOT NULL CHECK(passenger_pence >= 0),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             -- Submitted mileage claims retain the declaration wording shown at submission.
@@ -183,6 +201,21 @@ def create_app_database() -> None:
             );
             """
         )
+        # Preserve the app's former rates for all dates before the first admin change.
+        conn.execute(
+            """INSERT OR IGNORE INTO mileage_rate_schedules (
+                   effective_from, car_first_10000_pence, car_over_10000_pence,
+                   motorcycle_pence, bicycle_pence, passenger_pence
+               ) VALUES ('0001-01-01', ?, ?, ?, ?, ?)""",
+            (
+                int(BASE_RATE_BANDS["car"]["first_10000"] * 100),
+                int(BASE_RATE_BANDS["car"]["over_10000"] * 100),
+                int(BASE_RATE_BANDS["motorcycle"]["first_10000"] * 100),
+                int(BASE_RATE_BANDS["bicycle"]["first_10000"] * 100),
+                int(BASE_RATE_BANDS["passenger"] * 100),
+            ),
+        )
+        conn.commit()
         # Inspect the existing schema before adding fields so upgrades are repeatable.
         trip_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(trips)").fetchall()
@@ -1284,6 +1317,9 @@ def create_payment(
                     miles_one_way=trip["miles_one_way"],
                     return_trip=bool(trip["return_trip"]),
                     passengers=trip["passengers"],
+                    rate_bands=rate_schedule_to_bands(
+                        _rate_schedule_for_date(conn, trip["trip_date"])
+                    ),
                 )["total_amount_pence"]
                 for trip in trips
             )
@@ -1425,6 +1461,179 @@ def get_summary() -> dict[str, Any]:
             "trips": trips_count,
             "donations_pence": total_donations,
             "payments_pence": total_payments,
+        }
+    finally:
+        conn.close()
+
+
+def _rate_schedule_for_date(
+    conn: sqlite3.Connection,
+    effective_date: date | str,
+) -> dict[str, Any]:
+    """Fetch the last complete schedule effective on or before a trip date."""
+    date_value = effective_date.isoformat() if isinstance(effective_date, date) else effective_date
+    # ISO dates sort chronologically, so the latest eligible start is the active schedule.
+    row = conn.execute(
+        """SELECT * FROM mileage_rate_schedules
+           WHERE effective_from <= ?
+           ORDER BY effective_from DESC
+           LIMIT 1""",
+        (date_value,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"No mileage rate schedule applies on {date_value}.")
+    return dict(row)
+
+
+def get_rate_schedule_for_date(effective_date: date | str) -> dict[str, Any]:
+    """Return the complete rate schedule that applies to a given trip date."""
+    conn = get_connection()
+    try:
+        return _rate_schedule_for_date(conn, effective_date)
+    finally:
+        conn.close()
+
+
+def list_rate_schedules() -> list[dict[str, Any]]:
+    """List complete schedules with inclusive end dates derived from the next one."""
+    conn = get_connection()
+    try:
+        schedules = [
+            dict(row) for row in conn.execute(
+                "SELECT * FROM mileage_rate_schedules ORDER BY effective_from"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    for index, schedule in enumerate(schedules):
+        next_start = schedules[index + 1]["effective_from"] if index + 1 < len(schedules) else None
+        # Store only start dates; derive inclusive end dates to avoid editing old schedules.
+        schedule["effective_to"] = (
+            (date.fromisoformat(next_start) - timedelta(days=1)).isoformat()
+            if next_start else None
+        )
+    return schedules
+
+
+def create_rate_schedule(
+    *,
+    effective_from: str,
+    car_first_10000_pence: int,
+    car_over_10000_pence: int,
+    motorcycle_pence: int,
+    bicycle_pence: int,
+    passenger_pence: int,
+) -> dict[str, Any]:
+    """Add an immutable complete schedule effective from the supplied date."""
+    try:
+        parsed_date = date.fromisoformat(effective_from)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Effective date must be a valid YYYY-MM-DD date.") from exc
+    # The reserved year-one date anchors the original built-in rates permanently.
+    if parsed_date.isoformat() != effective_from or parsed_date == date.min:
+        raise ValueError("Choose a valid effective date after the original baseline.")
+
+    rate_values = {
+        "car_first_10000_pence": car_first_10000_pence,
+        "car_over_10000_pence": car_over_10000_pence,
+        "motorcycle_pence": motorcycle_pence,
+        "bicycle_pence": bicycle_pence,
+        "passenger_pence": passenger_pence,
+    }
+    # Reject bools and floats even though Python considers bool an int subtype.
+    for field, value in rate_values.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{field.replace('_', ' ')} must be a whole non-negative pence amount.")
+        if value > 2**63 - 1:
+            raise ValueError(f"{field.replace('_', ' ')} is too large.")
+
+    conn = get_connection()
+    try:
+        conn.execute(
+            """INSERT INTO mileage_rate_schedules (
+                   effective_from, car_first_10000_pence, car_over_10000_pence,
+                   motorcycle_pence, bicycle_pence, passenger_pence
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                parsed_date.isoformat(),
+                rate_values["car_first_10000_pence"],
+                rate_values["car_over_10000_pence"],
+                rate_values["motorcycle_pence"],
+                rate_values["bicycle_pence"],
+                rate_values["passenger_pence"],
+            ),
+        )
+        conn.commit()
+        return dict(conn.execute(
+            "SELECT * FROM mileage_rate_schedules WHERE effective_from = ?",
+            (parsed_date.isoformat(),),
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def get_dashboard_checks() -> dict[str, int | bool]:
+    """Return staff-facing record checks without inferring approval or payment status."""
+    conn = get_connection()
+    try:
+        # A missing payment link is only a record check; it does not assert approval.
+        unpaid_trip_count = conn.execute(
+            """SELECT COUNT(*) AS count
+               FROM trips
+               LEFT JOIN payment_trips ON payment_trips.trip_id = trips.id
+               WHERE payment_trips.trip_id IS NULL"""
+        ).fetchone()["count"]
+        # Count only donations already flagged eligible but lacking a usable linked declaration.
+        missing_declaration_count = conn.execute(
+            """SELECT COUNT(*) AS count
+               FROM donations
+               LEFT JOIN gift_aid_declarations
+                 ON gift_aid_declarations.id = donations.declaration_id
+               WHERE donations.active = 1
+                 AND donations.gift_aid_eligible = 1
+                 AND (
+                     gift_aid_declarations.id IS NULL
+                     OR gift_aid_declarations.active = 0
+                     OR gift_aid_declarations.withdrawn_date IS NOT NULL
+                 )"""
+        ).fetchone()["count"]
+        has_active_home_ground = conn.execute(
+            """SELECT EXISTS(
+                   SELECT 1 FROM destinations
+                   WHERE active = 1 AND home_ground = 1
+               ) AS found"""
+        ).fetchone()["found"]
+        return {
+            "trips_without_payment": int(unpaid_trip_count),
+            "eligible_donations_without_active_declaration": int(missing_declaration_count),
+            "has_active_home_ground": bool(has_active_home_ground),
+        }
+    finally:
+        conn.close()
+
+
+def get_person_dashboard(person_id: int | None) -> dict[str, Any]:
+    """Return a volunteer's trip count and recent trips, scoped to their person ID."""
+    if person_id is None:
+        return {"trip_count": 0, "recent_trips": []}
+    conn = get_connection()
+    try:
+        trip_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM trips WHERE person_id = ?",
+            (person_id,),
+        ).fetchone()["count"]
+        recent_trips = conn.execute(
+            """SELECT trips.trip_date, trips.status, destinations.name AS destination_name
+               FROM trips
+               LEFT JOIN destinations ON destinations.id = trips.destination_id
+               WHERE trips.person_id = ?
+               ORDER BY trips.trip_date DESC, trips.id DESC
+               LIMIT 3""",
+            (person_id,),
+        ).fetchall()
+        return {
+            "trip_count": int(trip_count),
+            "recent_trips": [dict(trip) for trip in recent_trips],
         }
     finally:
         conn.close()

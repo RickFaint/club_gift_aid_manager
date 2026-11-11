@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Mileage rates · Club Gift Aid Manager{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <span class="eyebrow">ADMINISTRATION</span>
+    <h1 class="mt-2">Mileage rates</h1>
+    <p>Set a complete mileage rate schedule and choose when it takes effect.</p>
+  </div>
+</div>
+
+<section class="card guide-card mb-4">
+  <div class="card-body">
+    <h2 class="h5">Add a rate schedule</h2>
+    <p class="text-muted">All rates are entered as whole pence per mile. The new schedule applies to trips occurring on or after its effective date. It does not change trips that occurred before that date, even if those trips are entered later.</p>
+    <p class="text-muted">Schedules are retained as history. Each schedule ends the day before the next schedule starts; if you add an earlier effective date, it applies until the next already-scheduled date.</p>
+    <form id="mileage-rate-form" class="row g-3">
+      <div class="col-md-4 col-lg-3">
+        <label class="form-label" for="rate-effective-from">Effective from</label>
+        <input id="rate-effective-from" class="form-control" type="date" name="effective_from" required />
+        <div class="form-text">The date the new rates start applying to journeys.</div>
+      </div>
+      <div class="col-md-4 col-lg-3">
+        <label class="form-label" for="rate-car-first">Car / van: first 10,000 miles (pence)</label>
+        <input id="rate-car-first" class="form-control" type="number" name="car_first_10000_pence" min="0" step="1" required />
+      </div>
+      <div class="col-md-4 col-lg-3">
+        <label class="form-label" for="rate-car-over">Car / van: over 10,000 miles (pence)</label>
+        <input id="rate-car-over" class="form-control" type="number" name="car_over_10000_pence" min="0" step="1" required />
+      </div>
+      <div class="col-md-4 col-lg-3">
+        <label class="form-label" for="rate-motorcycle">Motorcycle (pence)</label>
+        <input id="rate-motorcycle" class="form-control" type="number" name="motorcycle_pence" min="0" step="1" required />
+      </div>
+      <div class="col-md-4 col-lg-3">
+        <label class="form-label" for="rate-bicycle">Bicycle (pence)</label>
+        <input id="rate-bicycle" class="form-control" type="number" name="bicycle_pence" min="0" step="1" required />
+      </div>
+      <div class="col-md-4 col-lg-3">
+        <label class="form-label" for="rate-passenger">Passenger allowance (pence)</label>
+        <input id="rate-passenger" class="form-control" type="number" name="passenger_pence" min="0" step="1" required />
+      </div>
+      <div class="col-12">
+        <div id="mileage-rate-message" class="alert" role="status" hidden></div>
+        <button class="btn btn-primary" type="submit">Save rate schedule</button>
+      </div>
+    </form>
+  </div>
+</section>
+
+<section class="card guide-card">
+  <div class="table-toolbar">
+    <div><h2 class="h5 mb-1">Rate history</h2><span class="table-count" id="mileage-rate-count">Loading schedules…</span></div>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead><tr><th scope="col">Effective period</th><th scope="col">Car: first 10,000</th><th scope="col">Car: over 10,000</th><th scope="col">Motorcycle</th><th scope="col">Bicycle</th><th scope="col">Passenger</th></tr></thead>
+      <tbody id="mileage-rate-table-body"></tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
+
+{% block page_instructions %}
+<p>Enter all five rates in pence per mile and select the first day the complete schedule applies. The schedule is used according to the date the trip occurred, not the date it was entered.</p>
+<p class="mb-0">Rate schedules are kept as history. The effective period ends the day before the next schedule begins. A schedule for an earlier date is allowed and applies up to the next existing schedule.</p>
+{% endblock %}

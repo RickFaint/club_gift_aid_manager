@@ -62,6 +62,12 @@ For production, serve the application only over HTTPS and set `CLUB_GIFT_AID_COO
 
 Volunteer accounts must be linked to an existing person. Role checks and volunteer record scoping are enforced by the server, not just the UI.
 
+The authenticated application includes a **How it works** guide with separate administrator and user workflows, including a treasurer-specific explanation of access.
+
+The dashboard gives administrators and treasurers reminders for trips without a linked in-app reimbursement, active Gift Aid-eligible donations without an active unwithdrawn declaration link, and a missing active home ground. These are record checks, not approval or tax determinations. Administrators also see recent audit activity; volunteers see only their own trip count and recent trips.
+
+Administrators can maintain complete mileage rate schedules from the Mileage rates page. Each schedule has an effective date and whole-pence-per-mile rates for cars (first 10,000 and over), motorcycles, bicycles, and passenger allowance. The previous schedule applies through the day before the next schedule begins. Calculations select a schedule using the trip occurrence date, including when a trip is entered after a rate change. The original built-in rates are retained as the baseline before the first configured change.
+
 ## API examples
 
 - GET /people
@@ -82,6 +88,8 @@ Volunteer accounts must be linked to an existing person. Role checks and volunte
 - GET/PUT/DELETE /declarations/<id> (DELETE marks a declaration dormant; it never removes evidence)
 - GET /payments
 - POST /payments
+- GET /admin/mileage-rates (admin only; complete effective-date mileage schedules)
+- POST /admin/mileage-rates (admin only; add a complete mileage schedule)
 - GET /admin/audit (admin only)
 - GET /reports/summary
 - GET /reports/payment-reconciliation (admin/treasurer only; totals by person)

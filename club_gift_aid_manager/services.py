@@ -7,7 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 
-# Default reimbursement rates used when a caller does not provide rate bands.
+# Baseline rates used before the first administrator-scheduled rate change.
 # Amounts are pounds per mile; passenger allowance is added per passenger-mile.
 BASE_RATE_BANDS = {
     "car": {"first_10000": Decimal("0.45"), "over_10000": Decimal("0.25")},
@@ -15,6 +15,24 @@ BASE_RATE_BANDS = {
     "bicycle": {"first_10000": Decimal("0.20")},
     "passenger": Decimal("0.05"),
 }
+
+
+def rate_schedule_to_bands(schedule: dict[str, Any]) -> dict[str, Any]:
+    """Convert a stored rate schedule in pence per mile to calculation bands."""
+    # Calculations use decimal pounds; storage and admin input remain whole pence.
+    return {
+        "car": {
+            "first_10000": Decimal(int(schedule["car_first_10000_pence"])) / 100,
+            "over_10000": Decimal(int(schedule["car_over_10000_pence"])) / 100,
+        },
+        "motorcycle": {
+            "first_10000": Decimal(int(schedule["motorcycle_pence"])) / 100,
+        },
+        "bicycle": {
+            "first_10000": Decimal(int(schedule["bicycle_pence"])) / 100,
+        },
+        "passenger": Decimal(int(schedule["passenger_pence"])) / 100,
+    }
 
 
 def calculate_tax_year(value: date) -> str:
@@ -61,18 +79,15 @@ def calculate_trip_amounts(
     miles_at_band1 = min(total_miles, remaining_before_threshold)
     miles_at_band2 = max(total_miles - miles_at_band1, 0.0)
 
-    if vehicle_type == "motorcycle":
-        first_rate = Decimal("0.24")
-        over_rate = Decimal("0.24")
-    elif vehicle_type == "bicycle":
-        first_rate = Decimal("0.20")
-        over_rate = Decimal("0.20")
-    else:
-        first_rate = Decimal("0.45")
-        over_rate = Decimal("0.25")
+    vehicle_bands = rate_bands.get(vehicle_type)
+    if vehicle_bands is None:
+        vehicle_bands = BASE_RATE_BANDS.get(vehicle_type, BASE_RATE_BANDS["car"])
+    first_rate = Decimal(str(vehicle_bands["first_10000"]))
+    over_rate = Decimal(str(vehicle_bands.get("over_10000", first_rate)))
 
     mileage_amount = (Decimal(str(miles_at_band1)) * first_rate) + (Decimal(str(miles_at_band2)) * over_rate)
-    passenger_amount = Decimal(str(passengers)) * Decimal(str(total_miles)) * rate_bands.get("passenger", Decimal("0.05"))
+    passenger_rate = rate_bands.get("passenger", BASE_RATE_BANDS["passenger"])
+    passenger_amount = Decimal(str(passengers)) * Decimal(str(total_miles)) * passenger_rate
     total_amount = mileage_amount + passenger_amount
 
     def pence(value: Decimal) -> int:

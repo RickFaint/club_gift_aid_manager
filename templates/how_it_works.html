@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}How it works · Club Gift Aid Manager{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <span class="eyebrow">GUIDE</span>
+    <h1 class="mt-2">How the club manager works</h1>
+    <p>Follow the steps for your role. Your account controls which records and tools you can access.</p>
+  </div>
+</div>
+
+<ul class="nav nav-tabs guide-tabs mb-4" role="tablist" aria-label="Choose a guide">
+  {% if current_user.role == 'admin' %}
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="admin-guide-tab" data-bs-toggle="tab" data-bs-target="#admin-guide" type="button" role="tab" aria-controls="admin-guide" aria-selected="true">Admin guide</button>
+  </li>
+  {% endif %}
+  <li class="nav-item" role="presentation">
+    <button class="nav-link {{ 'active' if current_user.role != 'admin' else '' }}" id="user-guide-tab" data-bs-toggle="tab" data-bs-target="#user-guide" type="button" role="tab" aria-controls="user-guide" aria-selected="{{ 'true' if current_user.role != 'admin' else 'false' }}">User guide</button>
+  </li>
+</ul>
+
+<div class="tab-content">
+  {% if current_user.role == 'admin' %}
+  <section class="tab-pane fade show active" id="admin-guide" role="tabpanel" aria-labelledby="admin-guide-tab" tabindex="0">
+    <div class="card guide-card mb-4">
+      <div class="card-body">
+        <span class="guide-kicker">ADMIN GUIDE</span>
+        <h2 class="h4 mt-2">Set up and oversee the club records</h2>
+        <p>Administrators can use every area of the application, create accounts, see club-wide reports, and review the audit log. Treasurers can manage day-to-day club and finance records but do not have account administration, financial reports, or the audit log.</p>
+        <h3 class="h6 mt-4">The admin workflow</h3>
+        <ol class="guide-flow" aria-label="Administrator workflow, in order">
+          <li><strong>Set up access</strong><span>Create accounts and assign the least access needed.</span></li>
+          <li><strong>Prepare records</strong><span>Add people and active club or opponent locations.</span></li>
+          <li><strong>Record activity</strong><span>Capture trips, declarations, donations, and reimbursements.</span></li>
+          <li><strong>Review outcomes</strong><span>Check reports, reconciliation, and audited changes.</span></li>
+        </ol>
+        <p class="guide-caption mb-0">The numbered boxes show the usual sequence. You can return to records and update them as needed.</p>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-lg-6">
+        <article class="card guide-card h-100">
+          <div class="card-body">
+            <h3 class="h5">1. Set up people, access, and locations</h3>
+            <p>Add club contacts in <strong>People</strong>, then create an account in <strong>Accounts</strong> for each person who needs to sign in. Link volunteer accounts to their person record. Choose a role carefully:</p>
+            <ul>
+              <li><strong>Admin:</strong> all records and admin-only tools.</li>
+              <li><strong>Treasurer:</strong> people, trips, declarations, donations, payments, and payment reconciliation.</li>
+              <li><strong>Volunteer:</strong> their own linked person record and trips.</li>
+            </ul>
+            <p class="mb-0">Add grounds in <strong>Locations</strong> with a usable address or postcode for road-distance lookups. Mark the active club ground as the home ground to make it the default trip origin. CSV templates are available on the People/Trips/Locations workflows where supported.</p>
+          </div>
+        </article>
+      </div>
+      <div class="col-lg-6">
+        <article class="card guide-card h-100">
+          <div class="card-body">
+            <h3 class="h5">2. Keep the financial records distinct</h3>
+            <p>Record a donor's Gift Aid declaration and supporting evidence separately from each donation. Link a donation to an applicable declaration and only mark it Gift Aid eligible after checking donor eligibility and declaration coverage.</p>
+            <p>Record reimbursement payments against the relevant unpaid trips. The system calculates the full total for the selected trips; a trip can be included in only one payment.</p>
+            <p class="mb-0">Donations and reimbursement payments remain separate amounts. Linking a donation to a payment is for reference and reconciliation only; it does not allocate, subtract, or net either amount.</p>
+          </div>
+        </article>
+      </div>
+      <div class="col-lg-6">
+        <article class="card guide-card h-100">
+          <div class="card-body">
+            <h3 class="h5">3. Review reports and changes</h3>
+            <p>The admin-only <strong>Reports</strong> page summarizes trips, donations, payments, and volunteer totals. Filters affect the related table; CSV export downloads the rows currently shown in that table. Club-wide total cards are not changed by table filters.</p>
+            <p>Gift Aid in reports is an estimate, not a tax claim. The audit log shows who acted, when, the record involved, and changed field names—it does not show the old or new values.</p>
+            <p class="mb-0">Use <strong>Privacy / GDPR</strong> to review the club notice shown to users. An admin can replace it with a UTF-8 text file up to 64 KB.</p>
+          </div>
+        </article>
+      </div>
+      <div class="col-lg-6">
+        <article class="card guide-card h-100">
+          <div class="card-body">
+            <h3 class="h5">What to remember</h3>
+            <ul class="mb-0">
+              <li>Inactive people and locations are retained for history, but are not available for new activity.</li>
+              <li>Removing a person anonymizes identifying details while preserving related trip and financial history.</li>
+              <li>CSV imports validate the complete file before saving records. Correct any reported row or route errors and upload again.</li>
+              <li>Road mileage is looked up from location addresses using the configured routing services. Check locations if a route cannot be found.</li>
+            </ul>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
+  <section class="tab-pane fade {{ 'show active' if current_user.role != 'admin' else '' }}" id="user-guide" role="tabpanel" aria-labelledby="user-guide-tab" tabindex="0">
+    <div class="card guide-card mb-4">
+      <div class="card-body">
+        <span class="guide-kicker">USER GUIDE</span>
+        <h2 class="h4 mt-2">Submit and follow a mileage claim</h2>
+        <p>Use your club account to record a journey. A submitted claim is a trip record; it does not by itself mean that reimbursement has been paid.</p>
+        <h3 class="h6 mt-4">A typical trip</h3>
+        <ol class="guide-flow" aria-label="Trip submission workflow, in order">
+          <li><strong>Open Trips</strong><span>Start a new claim from the Trips page.</span></li>
+          <li><strong>Enter journey</strong><span>Choose origin, destination, date, and vehicle.</span></li>
+          <li><strong>Check details</strong><span>Review road miles, return journey, and passengers.</span></li>
+          <li><strong>Accept and submit</strong><span>Read the declaration and confirm it before sending.</span></li>
+          <li><strong>Review history</strong><span>Find your saved trip in Trip history.</span></li>
+        </ol>
+        <p class="guide-caption mb-0">For a route lookup, choose active locations with accurate addresses. If the mileage is blank or a route error appears, ask the club administrator to check the location details.</p>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-lg-6">
+        <article class="card guide-card h-100">
+          <div class="card-body">
+            <h3 class="h5">Before submitting</h3>
+            <ul>
+              <li>Select the trip's origin and destination. The one-way road distance is calculated from their saved locations; it is not editable on the form.</li>
+              <li>Enter the date and vehicle type. The trip date determines its UK tax year.</li>
+              <li>Mark <strong>Return trip</strong> when the journey returned to its origin, and enter eligible adult volunteers carried (not the driver).</li>
+              <li>Read and accept the displayed mileage declaration. The claim cannot be submitted without it.</li>
+            </ul>
+            <p class="mb-0">You can upload multiple trips from a CSV template on the Trips page. The full file is checked before any trips are saved; mileage is calculated from the selected locations.</p>
+          </div>
+        </article>
+      </div>
+      <div class="col-lg-6">
+        <article class="card guide-card h-100">
+          <div class="card-body">
+            <h3 class="h5">What you can see depends on your role</h3>
+            <p><strong>Volunteers</strong> can review their own linked person record and trip history. They cannot see other volunteers' trips or financial records.</p>
+            <p class="mb-0"><strong>Treasurers</strong> can also manage club people and locations, declarations, donations, payments, and payment reconciliation. They cannot manage accounts, view the admin financial reports, or view the audit log. An administrator can submit a trip for any person; treasurers and volunteers submit only for their own linked person.</p>
+          </div>
+        </article>
+      </div>
+      <div class="col-lg-6">
+        <article class="card guide-card h-100">
+          <div class="card-body">
+            <h3 class="h5">Understand payments and donations</h3>
+            <p>Trip details and any reimbursement payment are separate records. The club records a payment when it has been made and links it to the trip or trips covered.</p>
+            <p class="mb-0">Donations are also separate from reimbursements. A donation-to-payment link is a reference for reconciliation only; amounts are not deducted from each other.</p>
+          </div>
+        </article>
+      </div>
+      <div class="col-lg-6">
+        <article class="card guide-card h-100">
+          <div class="card-body">
+            <h3 class="h5">Need help?</h3>
+            <ul class="mb-0">
+              <li>Use the <strong>Instructions</strong> button on a page for page-specific tips.</li>
+              <li>Use the small <strong>?</strong> buttons beside fields to see what to enter.</li>
+              <li>Use <strong>Privacy / GDPR</strong> to read the club's privacy statement.</li>
+              <li>Contact your club administrator if you need an account change, a location corrected, or help with an error.</li>
+            </ul>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+</div>
+
+<section class="card guide-card mt-4">
+  <div class="card-body">
+    <h2 class="h4">Role permissions at a glance</h2>
+    <p class="text-muted">Access is enforced by the application, not just by which links are displayed.</p>
+    <div class="table-responsive">
+      <table class="table table-sm table-bordered align-middle mb-0">
+        <caption class="caption-top">Summary of the three application roles</caption>
+        <thead><tr><th scope="col">Area</th><th scope="col">Admin</th><th scope="col">Treasurer</th><th scope="col">Volunteer</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">People and trips</th><td>All records</td><td>All records</td><td>Own person and trips only</td></tr>
+          <tr><th scope="row">Locations, declarations, donations, payments</th><td>Manage</td><td>Manage</td><td>No access</td></tr>
+          <tr><th scope="row">Payment reconciliation</th><td>View</td><td>View</td><td>No access</td></tr>
+          <tr><th scope="row">Financial reports, accounts, audit log</th><td>Manage / view</td><td>No access</td><td>No access</td></tr>
+          <tr><th scope="row">Trip assignment</th><td>Any person</td><td>Own linked person</td><td>Own linked person</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="row g-3 mt-1">
+  <div class="col-lg-6">
+    <article class="card guide-card h-100">
+      <div class="card-body">
+        <h2 class="h4">Glossary</h2>
+        <dl class="guide-glossary mb-0">
+          <dt>Trip claim</dt><dd>A submitted record of a journey and its mileage. A claim is not proof that reimbursement has been paid.</dd>
+          <dt>Reimbursement</dt><dd>A separate payment record for one or more eligible trip records. The app requires the linked trips' full calculated amount.</dd>
+          <dt>Gift Aid declaration</dt><dd>A donor's permission for an eligible charity or CASC to claim Gift Aid on eligible donations. Keep the required declaration evidence.</dd>
+          <dt>Eligible donation</dt><dd>A donation the club has checked against current HMRC rules, donor eligibility, and a relevant declaration. The app's flag is a record, not a tax decision.</dd>
+          <dt>Reconciliation</dt><dd>A comparison of payment amounts and linked donation records. The link is for reference; it does not offset either amount.</dd>
+          <dt>Dormant record</dt><dd>A retained record made unavailable for new activity or totals, while keeping its history and relationships.</dd>
+        </dl>
+      </div>
+    </article>
+  </div>
+  <div class="col-lg-6">
+    <article class="card guide-card h-100">
+      <div class="card-body">
+        <h2 class="h4">Official guidance and useful references</h2>
+        <ul class="mb-3">
+          <li><a href="https://www.gov.uk/claim-gift-aid" target="_blank" rel="noopener noreferrer">HMRC: Claiming Gift Aid</a> — overview of eligibility and claims.</li>
+          <li><a href="https://www.gov.uk/claim-gift-aid/gift-aid-declarations" target="_blank" rel="noopener noreferrer">HMRC: Gift Aid declarations</a> — declaration details and record keeping.</li>
+          <li><a href="https://www.gov.uk/claim-gift-aid/what-you-can-claim-it-on" target="_blank" rel="noopener noreferrer">HMRC: What you can claim Gift Aid on</a> — donations that do and do not qualify.</li>
+          <li><a href="https://www.gov.uk/expenses-and-benefits-business-travel-mileage/rules-for-tax" target="_blank" rel="noopener noreferrer">HMRC: Mileage allowance payments</a> — employee mileage tax rules and rates.</li>
+          <li><a href="https://www.gov.uk/government/publications/internal-financial-controls-for-charities-cc8" target="_blank" rel="noopener noreferrer">Charity Commission: Internal financial controls (CC8)</a> — financial controls for charities in England and Wales.</li>
+          <li><a href="https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/individual-rights/the-right-to-be-informed/" target="_blank" rel="noopener noreferrer">ICO: The right to be informed</a> — privacy notices and information for people.</li>
+        </ul>
+        <p class="small text-muted mb-0">These are reference links, not tax or legal advice. Check which rules apply to your club and jurisdiction. Administrators can maintain dated rates on the Mileage rates page; each trip uses the schedule effective on the date it occurred, not the date it was entered. Before the first scheduled change, the app uses its original default rates: 45p per mile for the first 10,000 car miles, then 25p; 24p for motorcycles; and 20p for bicycles, plus a passenger amount. HMRC's employee mileage rules may differ, including rates that change over time. Ask the club to confirm its rates and seek professional advice where needed.</p>
+      </div>
+    </article>
+  </div>
+</section>
+{% endblock %}

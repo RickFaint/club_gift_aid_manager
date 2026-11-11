@@ -20,19 +20,24 @@ from club_gift_aid_manager.db import (
     create_donation,
     create_payment,
     create_person,
+    create_rate_schedule,
     create_trip,
     create_user,
+    deactivate_declaration,
     get_person,
     get_connection,
     get_user_by_id,
     get_trip,
+    get_rate_schedule_for_date,
     get_summary,
+    list_rate_schedules,
     list_destinations,
     list_declarations,
     list_donations,
     list_payment_reconciliation,
     list_payments,
     save_destination_coordinates,
+    update_donation,
 )
 from club_gift_aid_manager.services import calculate_tax_year, calculate_trip_amounts, validate_declaration
 
@@ -59,6 +64,148 @@ def signed_in_client(role="admin", person_id=None):
     return client
 
 
+@pytest.mark.parametrize(
+    ("role", "expected_text", "unexpected_text"),
+    [
+        ("admin", b"Admin guide", None),
+        ("treasurer", b"User guide", b"Admin guide"),
+        ("volunteer", b"User guide", b"Admin guide"),
+    ],
+)
+def test_how_it_works_page_shows_guide_for_role(role, expected_text, unexpected_text):
+    """The guide is available to signed-in users and admin details stay private."""
+    person = create_person(name=f"{role} guide person") if role == "volunteer" else None
+    client = signed_in_client(role=role, person_id=person["id"] if person else None)
+
+    response = client.get("/how-it-works")
+
+    assert response.status_code == 200
+    assert expected_text in response.data
+    if unexpected_text:
+        assert unexpected_text not in response.data
+
+
+def test_dashboard_overview_returns_staff_record_checks_and_admin_activity():
+    """Staff see useful data checks, while recent audit activity remains admin-only."""
+    person = create_person(name="Dashboard volunteer")
+    create_trip(
+        person_id=person["id"],
+        vehicle_type="car",
+        trip_date=date(2026, 10, 1),
+        miles_one_way=10,
+        return_trip=False,
+        declaration_text="I accept the mileage declaration.",
+    )
+    create_donation(
+        person_id=person["id"],
+        amount_pence=1000,
+        gift_aid_eligible=True,
+    )
+    active_declaration = create_declaration(
+        person_id=person["id"],
+        full_name="Dashboard donor",
+    )
+    create_donation(
+        person_id=person["id"],
+        amount_pence=1000,
+        declaration_id=active_declaration["id"],
+        gift_aid_eligible=True,
+    )
+    withdrawn_declaration = create_declaration(
+        person_id=person["id"],
+        full_name="Withdrawn donor",
+        withdrawn_date="2026-10-10",
+    )
+    create_donation(
+        person_id=person["id"],
+        amount_pence=1000,
+        declaration_id=withdrawn_declaration["id"],
+        gift_aid_eligible=True,
+    )
+    dormant_declaration = create_declaration(
+        person_id=person["id"],
+        full_name="Dormant donor",
+    )
+    deactivate_declaration(dormant_declaration["id"])
+    create_donation(
+        person_id=person["id"],
+        amount_pence=1000,
+        declaration_id=dormant_declaration["id"],
+        gift_aid_eligible=True,
+    )
+    create_donation(
+        person_id=person["id"],
+        amount_pence=1000,
+        gift_aid_eligible=False,
+    )
+    inactive_donation = create_donation(
+        person_id=person["id"],
+        amount_pence=1000,
+        gift_aid_eligible=True,
+    )
+    update_donation(inactive_donation["id"], active=False)
+    create_destination(name="Dashboard ground", home_ground=True)
+
+    admin_overview = signed_in_client("admin").get("/dashboard/overview")
+    treasurer_overview = signed_in_client("treasurer").get("/dashboard/overview")
+
+    assert admin_overview.status_code == 200
+    admin_data = admin_overview.get_json()
+    assert admin_data["trips_without_payment"] == 1
+    assert admin_data["eligible_donations_without_active_declaration"] == 3
+    assert admin_data["has_active_home_ground"] is True
+    assert "recent_activity" in admin_data
+
+    assert treasurer_overview.status_code == 200
+    treasurer_data = treasurer_overview.get_json()
+    assert treasurer_data["trips_without_payment"] == 1
+    assert "recent_activity" not in treasurer_data
+
+
+def test_volunteer_dashboard_overview_is_limited_to_own_trip_information():
+    """Volunteer dashboard data never includes club-wide financial or admin details."""
+    own_person = create_person(name="Own dashboard person")
+    other_person = create_person(name="Other dashboard person")
+    create_trip(
+        person_id=own_person["id"],
+        vehicle_type="car",
+        trip_date=date(2026, 10, 1),
+        miles_one_way=10,
+        return_trip=False,
+        declaration_text="I accept the mileage declaration.",
+    )
+    create_trip(
+        person_id=other_person["id"],
+        vehicle_type="car",
+        trip_date=date(2026, 10, 2),
+        miles_one_way=20,
+        return_trip=False,
+        declaration_text="I accept the mileage declaration.",
+    )
+    for day in (3, 4, 5):
+        create_trip(
+            person_id=own_person["id"],
+            vehicle_type="car",
+            trip_date=date(2026, 10, day),
+            miles_one_way=10,
+            return_trip=False,
+            declaration_text="I accept the mileage declaration.",
+        )
+
+    response = signed_in_client("volunteer", person_id=own_person["id"]).get("/dashboard/overview")
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["trip_count"] == 4
+    assert [trip["trip_date"] for trip in data["recent_trips"]] == [
+        "2026-10-05",
+        "2026-10-04",
+        "2026-10-03",
+    ]
+    assert "trips_without_payment" not in data
+    assert "recent_activity" not in data
+
+
 def test_tax_year_for_2026_04_06_is_2026_27():
     """The first day of a UK tax year belongs to the new year."""
     assert calculate_tax_year(date(2026, 4, 6)) == "2026/27"
@@ -73,6 +220,205 @@ def test_car_claim_requires_declaration():
     """A claim cannot be submitted without accepted declaration wording."""
     with pytest.raises(ValueError, match="Declaration must be accepted"):
         validate_declaration(False, "I declare that I have taken other parents' children on this journey.")
+
+
+def test_rate_schedules_are_complete_and_selected_by_trip_occurrence_date():
+    """A later-entered trip still uses the schedule effective on its trip date."""
+    create_rate_schedule(
+        effective_from="2026-04-01",
+        car_first_10000_pence=60,
+        car_over_10000_pence=30,
+        motorcycle_pence=35,
+        bicycle_pence=25,
+        passenger_pence=10,
+    )
+
+    before_change = get_rate_schedule_for_date("2026-03-31")
+    on_change = get_rate_schedule_for_date("2026-04-01")
+    schedules = list_rate_schedules()
+
+    assert before_change["effective_from"] == "0001-01-01"
+    assert on_change["effective_from"] == "2026-04-01"
+    assert schedules[0]["effective_to"] == "2026-03-31"
+    assert schedules[1]["effective_to"] is None
+
+    person = create_person(name="Rate history volunteer")
+    old_trip = create_trip(
+        person_id=person["id"],
+        vehicle_type="car",
+        trip_date=date(2026, 3, 31),
+        miles_one_way=10,
+        return_trip=False,
+        declaration_text="I accept the mileage declaration.",
+    )
+    new_trip = create_trip(
+        person_id=person["id"],
+        vehicle_type="car",
+        trip_date=date(2026, 4, 1),
+        miles_one_way=10,
+        return_trip=False,
+        declaration_text="I accept the mileage declaration.",
+    )
+
+    old_payment = create_payment(
+        person_id=person["id"],
+        amount_pence=450,
+        trip_ids=[old_trip["id"]],
+    )
+    new_payment = create_payment(
+        person_id=person["id"],
+        amount_pence=600,
+        trip_ids=[new_trip["id"]],
+    )
+
+    assert old_payment["amount_pence"] == 450
+    assert new_payment["amount_pence"] == 600
+
+
+def test_backdated_rate_schedule_closes_periods_without_replacing_later_schedule():
+    """Adding a schedule between existing dates recomputes neighboring intervals."""
+    rates = {
+        "car_first_10000_pence": 60,
+        "car_over_10000_pence": 30,
+        "motorcycle_pence": 35,
+        "bicycle_pence": 25,
+        "passenger_pence": 10,
+    }
+    create_rate_schedule(effective_from="2027-01-01", **rates)
+    create_rate_schedule(effective_from="2025-01-01", **rates)
+
+    schedules = list_rate_schedules()
+
+    assert [schedule["effective_from"] for schedule in schedules] == [
+        "0001-01-01",
+        "2025-01-01",
+        "2027-01-01",
+    ]
+    assert [schedule["effective_to"] for schedule in schedules] == [
+        "2024-12-31",
+        "2026-12-31",
+        None,
+    ]
+    assert get_rate_schedule_for_date(date(2026, 12, 31))["effective_from"] == "2025-01-01"
+    assert get_rate_schedule_for_date(date(2027, 1, 1))["effective_from"] == "2027-01-01"
+
+
+@pytest.mark.parametrize("effective_from", ["not-a-date", "2026-02-30", "0001-01-01"])
+def test_rate_schedule_rejects_malformed_or_reserved_effective_dates(effective_from):
+    """Malformed dates and the built-in baseline date cannot be overwritten."""
+    with pytest.raises(ValueError, match="Effective date|original baseline"):
+        create_rate_schedule(
+            effective_from=effective_from,
+            car_first_10000_pence=45,
+            car_over_10000_pence=25,
+            motorcycle_pence=24,
+            bicycle_pence=20,
+            passenger_pence=5,
+        )
+
+
+@pytest.mark.parametrize("invalid_rate", [-1, True, 1.5, 2**63])
+def test_rate_schedule_rejects_negative_non_integer_and_unstorable_rates(invalid_rate):
+    """Rate storage accepts only non-negative whole pence within SQLite integer range."""
+    rates = {
+        "car_first_10000_pence": 45,
+        "car_over_10000_pence": 25,
+        "motorcycle_pence": 24,
+        "bicycle_pence": 20,
+        "passenger_pence": 5,
+    }
+    rates["passenger_pence"] = invalid_rate
+
+    with pytest.raises(ValueError):
+        create_rate_schedule(effective_from="2027-01-01", **rates)
+
+
+def test_admin_can_manage_rate_schedules_and_other_roles_cannot():
+    """Only admins can view or add rates, and additions are audited."""
+    admin = signed_in_client("admin")
+    treasurer = signed_in_client("treasurer")
+    volunteer_person = create_person(name="Rate schedule volunteer")
+    volunteer = signed_in_client("volunteer", person_id=volunteer_person["id"])
+    csrf = {"X-CSRF-Token": "test-csrf-token"}
+    schedule_data = {
+        "effective_from": "2027-01-01",
+        "car_first_10000_pence": 50,
+        "car_over_10000_pence": 25,
+        "motorcycle_pence": 24,
+        "bicycle_pence": 20,
+        "passenger_pence": 5,
+    }
+
+    assert admin.get("/mileage-rates/page").status_code == 200
+    assert treasurer.get("/mileage-rates/page").status_code == 403
+    assert volunteer.get("/mileage-rates/page").status_code == 403
+    assert treasurer.get("/admin/mileage-rates").status_code == 403
+    assert volunteer.get("/admin/mileage-rates").status_code == 403
+
+    created = admin.post("/admin/mileage-rates", json=schedule_data, headers=csrf)
+    assert created.status_code == 201
+    assert created.get_json()["car_first_10000_pence"] == 50
+    duplicate = admin.post("/admin/mileage-rates", json=schedule_data, headers=csrf)
+    assert duplicate.status_code == 409
+    invalid = admin.post(
+        "/admin/mileage-rates",
+        json={**schedule_data, "bicycle_pence": -1},
+        headers=csrf,
+    )
+    assert invalid.status_code == 400
+    missing = admin.post(
+        "/admin/mileage-rates",
+        json={"effective_from": "2028-01-01"},
+        headers=csrf,
+    )
+    assert missing.status_code == 400
+    fractional = admin.post(
+        "/admin/mileage-rates",
+        json={**schedule_data, "car_first_10000_pence": 50.5},
+        headers=csrf,
+    )
+    assert fractional.status_code == 400
+    assert admin.get("/admin/mileage-rates").get_json()["items"][-1]["effective_from"] == "2027-01-01"
+
+    audited = [
+        event for event in admin.get("/admin/audit").get_json()["items"]
+        if event["entity_type"] == "mileage_rate_schedule"
+    ]
+    assert len(audited) == 1
+    assert audited[0]["action"] == "created"
+
+
+def test_reimbursement_calculation_api_uses_trip_date_rate_schedule():
+    """The amount API reports rates for the date the journey took place."""
+    admin = signed_in_client("admin")
+    create_rate_schedule(
+        effective_from="2026-04-01",
+        car_first_10000_pence=60,
+        car_over_10000_pence=30,
+        motorcycle_pence=35,
+        bicycle_pence=25,
+        passenger_pence=10,
+    )
+
+    before_change = admin.get(
+        "/api/calculate?trip_date=2026-03-31&vehicle_type=car&miles_one_way=10&return_trip=false"
+    ).get_json()
+    on_change = admin.get(
+        "/api/calculate?trip_date=2026-04-01&vehicle_type=car&miles_one_way=10&return_trip=false"
+    ).get_json()
+    motorcycle = admin.get(
+        "/api/calculate?trip_date=2026-04-01&vehicle_type=motorcycle&miles_one_way=10&return_trip=false"
+    ).get_json()
+    bicycle_with_passenger = admin.get(
+        "/api/calculate?trip_date=2026-04-01&vehicle_type=bicycle&miles_one_way=10&return_trip=false&passengers=1"
+    ).get_json()
+
+    assert before_change["rate_effective_from"] == "0001-01-01"
+    assert before_change["total_amount_pence"] == 450
+    assert on_change["rate_effective_from"] == "2026-04-01"
+    assert on_change["total_amount_pence"] == 600
+    assert motorcycle["total_amount_pence"] == 350
+    assert bicycle_with_passenger["total_amount_pence"] == 350
 
 
 def test_calculate_trip_amounts_for_car():
