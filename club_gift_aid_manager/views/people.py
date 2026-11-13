@@ -9,7 +9,7 @@ from flask import Blueprint
 
 from .shared import *  # noqa: F403 - shared view vocabulary is intentionally centralised
 from ..auth.decorators import roles_required
-from ..validation import as_bool, require_fields
+from ..validation import as_bool, as_email, as_text, require_fields
 
 
 blueprint = Blueprint("people", __name__)
@@ -47,12 +47,12 @@ def people_create():
     require_fields(payload, ("name",))
 
     person = create_person(
-        name=payload["name"],
-        email=payload.get("email"),
-        phone=payload.get("phone"),
+        name=as_text(payload["name"], "name", maximum=200, required=True),
+        email=as_email(payload.get("email")),
+        phone=as_text(payload.get("phone"), "phone", maximum=50),
         role=payload.get("role", Role.VOLUNTEER.value),
         active=as_bool(payload.get("active"), default=True),
-        notes=payload.get("notes"),
+        notes=as_text(payload.get("notes"), "notes", maximum=2000),
     )
     audit_change("created", "person", person["id"], person.keys())
     return jsonify(person), 201
@@ -92,7 +92,15 @@ def people_update(person_id: int):
     """Edit a person and audit the changed field names."""
     payload = get_payload()
     if "active" in payload:
-        payload["active"] = str(payload["active"]).lower() in {"true", "1", "yes", "on"}
+        payload["active"] = as_bool(payload["active"])
+    if "name" in payload:
+        payload["name"] = as_text(payload["name"], "name", maximum=200, required=True)
+    if "email" in payload:
+        payload["email"] = as_email(payload["email"])
+    if "phone" in payload:
+        payload["phone"] = as_text(payload["phone"], "phone", maximum=50)
+    if "notes" in payload:
+        payload["notes"] = as_text(payload["notes"], "notes", maximum=2000)
     person = update_person(person_id, **payload)
     if person is None:
         return jsonify({"error": "Person not found"}), 404

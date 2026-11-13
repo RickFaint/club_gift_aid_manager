@@ -8,7 +8,7 @@ import os
 import time
 from threading import Lock
 from urllib.error import URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from .db import get_destination, save_destination_coordinates
@@ -40,6 +40,10 @@ class RouteLookupError(ValueError):
 
 def _request_json(url: str) -> object:
     """Fetch JSON with a short timeout and identify service/network failures."""
+    # The service URL is configurable, but local-file and custom URL schemes
+    # must never be allowed to turn routing into a file-read or SSRF primitive.
+    if urlsplit(url).scheme not in {"http", "https"}:
+        raise RouteLookupError("The route service URL must use HTTP or HTTPS.", 502)
     request = Request(
         url,
         headers={
@@ -48,7 +52,7 @@ def _request_json(url: str) -> object:
         },
     )
     try:
-        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:  # nosec B310
             return json.loads(response.read().decode("utf-8"))
     except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise RouteLookupError("The route service is unavailable. Please try again later.", 502) from exc

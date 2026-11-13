@@ -9,7 +9,9 @@ from flask import Blueprint
 
 from .shared import *  # noqa: F403 - shared view vocabulary is intentionally centralised
 from ..auth.decorators import roles_required
-from ..validation import as_bool, as_date, as_float, as_int, require_fields
+from ..validation import (
+    as_bool, as_date, as_int, as_non_negative_float, as_non_negative_int, require_fields,
+)
 
 
 blueprint = Blueprint("trips", __name__)
@@ -42,10 +44,10 @@ def submit_claim():
         return jsonify({"error": "Trip date is required and must be ISO format."}), 400
 
     vehicle_type = payload.get("vehicle_type", "car")
-    miles_one_way = float(payload.get("miles_one_way", 0) or 0)
-    return_trip = str(payload.get("return_trip", "false")).lower() in {"true", "1", "yes"}
-    passengers = int(payload.get("passengers", 0) or 0)
-    declaration_accepted = str(payload.get("declaration_accepted", "false")).lower() in {"true", "1", "yes"}
+    miles_one_way = as_non_negative_float(payload.get("miles_one_way", 0) or 0, "miles_one_way")
+    return_trip = as_bool(payload.get("return_trip"))
+    passengers = as_non_negative_int(payload.get("passengers", 0) or 0, "passengers")
+    declaration_accepted = as_bool(payload.get("declaration_accepted"))
     declaration_text = get_declaration_text()
 
     try:
@@ -107,9 +109,9 @@ def calculate_route():
     except (KeyError, TypeError, ValueError):
         return jsonify({"error": "Trip date is required and must be ISO format."}), 400
 
-    miles_one_way = float(payload.get("miles_one_way", 0) or 0)
-    round_trip = str(payload.get("return_trip", "false")).lower() in {"true", "1", "yes"}
-    passengers = int(payload.get("passengers", 0) or 0)
+    miles_one_way = as_non_negative_float(payload.get("miles_one_way", 0) or 0, "miles_one_way")
+    round_trip = as_bool(payload.get("return_trip"))
+    passengers = as_non_negative_int(payload.get("passengers", 0) or 0, "passengers")
     vehicle_type = payload.get("vehicle_type", "car")
     # Use the journey date, not the current date or the date the claim is entered.
     rate_schedule = get_rate_schedule_for_date(trip_date)
@@ -188,9 +190,9 @@ def trips_create():
             destination_id=as_int(payload["destination_id"], "destination_id"),
             vehicle_type=payload["vehicle_type"],
             trip_date=as_date(payload["trip_date"], "trip_date"),
-            miles_one_way=as_float(payload["miles_one_way"], "miles_one_way"),
+            miles_one_way=as_non_negative_float(payload["miles_one_way"], "miles_one_way"),
             return_trip=as_bool(payload.get("return_trip")),
-            passengers=as_int(payload.get("passengers", 0) or 0, "passengers"),
+            passengers=as_non_negative_int(payload.get("passengers", 0) or 0, "passengers"),
             declaration_accepted=declaration_accepted,
             declaration_text=declaration_text,
             tax_year=calculate_tax_year(as_date(payload["trip_date"], "trip_date")),
@@ -205,7 +207,12 @@ def trips_create():
 @blueprint.post("/trips/import")
 @roles_required(Role.ADMIN, Role.TREASURER, Role.VOLUNTEER)
 def trips_import():
-    """Validate and atomically import trip records from a CSV file."""
+    """Queue a bounded background trip import."""
+    return queue_csv_import("trips", _trips_import_now)
+
+
+def _trips_import_now():
+    """Validate and atomically import trip records inside a worker context."""
     upload = request.files.get("file")
     if upload is None or not upload.filename:
         return jsonify({"error": "Select a CSV file to upload."}), 400
@@ -347,8 +354,9 @@ def trips_import():
         route_key = (trip["origin_id"], trip["destination_id"])
         if route_key not in route_cache:
             try:
-                route_cache[route_key] = float(
-                    calculate_route_distance(*route_key)["distance_miles"]
+                route_cache[route_key] = as_non_negative_float(
+                    calculate_route_distance(*route_key)["distance_miles"],
+                    "route distance",
                 )
             except RouteLookupError as exc:
                 route_cache[route_key] = str(exc)
@@ -426,6 +434,15 @@ def trips_get(trip_id: int):
 def trips_update(trip_id: int):
     """Update an administrative trip record and note fields changed in the audit."""
     payload = get_payload()
+    if "miles_one_way" in payload:
+        payload["miles_one_way"] = as_non_negative_float(payload["miles_one_way"], "miles_one_way")
+    if "passengers" in payload:
+        payload["passengers"] = as_non_negative_int(payload["passengers"], "passengers")
+    if "trip_date" in payload:
+        payload["trip_date"] = as_date(payload["trip_date"], "trip_date")
+    for field in ("return_trip", "declaration_accepted"):
+        if field in payload:
+            payload[field] = as_bool(payload[field])
     try:
         trip = update_trip(trip_id, **payload)
     except ValueError as exc:

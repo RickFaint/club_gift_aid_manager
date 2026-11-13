@@ -9,7 +9,7 @@ from flask import Blueprint
 
 from .shared import *  # noqa: F403 - shared view vocabulary is intentionally centralised
 from ..auth.decorators import roles_required
-from ..validation import as_bool, require_fields
+from ..validation import as_bool, as_text, require_fields
 
 
 blueprint = Blueprint("destinations", __name__)
@@ -41,11 +41,11 @@ def destinations_create():
     require_fields(payload, ("name",))
     try:
         destination = create_destination(
-            name=str(payload["name"]),
-            address=payload.get("address"),
-            town_city=payload.get("town_city"),
-            postcode=payload.get("postcode"),
-            notes=payload.get("notes"),
+            name=as_text(payload["name"], "name", maximum=200, required=True),
+            address=as_text(payload.get("address"), "address", maximum=500),
+            town_city=as_text(payload.get("town_city"), "town_city", maximum=200),
+            postcode=as_text(payload.get("postcode"), "postcode", maximum=20),
+            notes=as_text(payload.get("notes"), "notes", maximum=2000),
             home_ground=as_bool(payload.get("home_ground")),
         )
     except ValueError as exc:
@@ -59,7 +59,12 @@ def destinations_create():
 @blueprint.post("/destinations/import")
 @roles_required(Role.ADMIN, Role.TREASURER)
 def destinations_import():
-    """Validate and import locations from a CSV file."""
+    """Queue a bounded background location import."""
+    return queue_csv_import("destinations", _destinations_import_now)
+
+
+def _destinations_import_now():
+    """Validate and atomically import locations inside a worker context."""
     upload = request.files.get("file")
     if upload is None or not upload.filename:
         return jsonify({"error": "Select a CSV file to upload."}), 400
@@ -101,10 +106,17 @@ def destinations_import():
             if home_ground_value not in {"", "true", "1", "yes", "on", "false", "0", "no", "off"}:
                 raise ValueError(f"Row {row_number} has an invalid home_ground value; use yes or no.")
             home_ground = home_ground_value in {"true", "1", "yes", "on"}
-            location_rows.append((row_number, {
-                field: (row.get(field) or "").strip() or None
-                for field in ("name", "address", "town_city", "postcode", "notes")
-            } | {"home_ground": home_ground}))
+            limits = {"name": 200, "address": 500, "town_city": 200, "postcode": 20, "notes": 2000}
+            try:
+                location = {
+                    field: as_text(
+                        row.get(field), field, maximum=maximum, required=field == "name"
+                    )
+                    for field, maximum in limits.items()
+                }
+            except ValueError as exc:
+                raise ValueError(f"Row {row_number}: {exc}") from exc
+            location_rows.append((row_number, location | {"home_ground": home_ground}))
     except (csv.Error, ValueError) as exc:
         return jsonify({"error": str(exc) or "The CSV file is malformed."}), 400
 
@@ -161,9 +173,12 @@ def destinations_update(destination_id: int):
     """Update a location and audit edits or active/dormant status changes."""
     payload = get_payload()
     if "active" in payload:
-        payload["active"] = str(payload["active"]).lower() in {"true", "1", "yes", "on"}
+        payload["active"] = as_bool(payload["active"])
     if "home_ground" in payload:
-        payload["home_ground"] = str(payload["home_ground"]).lower() in {"true", "1", "yes", "on"}
+        payload["home_ground"] = as_bool(payload["home_ground"])
+    for field, maximum in {"name": 200, "address": 500, "town_city": 200, "postcode": 20, "notes": 2000}.items():
+        if field in payload:
+            payload[field] = as_text(payload[field], field, maximum=maximum, required=field == "name")
     try:
         destination = update_destination(destination_id, **payload)
     except ValueError as exc:

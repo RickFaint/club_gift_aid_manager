@@ -1,6 +1,6 @@
 # Runtime dependencies.
 Flask==3.1.3
-cryptography>=44,<47
+cryptography>=50,<51
 
 # Test dependencies used by the repository's regression suite.
 pytest==9.0.3

@@ -9,10 +9,12 @@ same predictable validation errors.
 from __future__ import annotations
 
 from datetime import date
+import math
+import re
 from typing import Iterable, Mapping, Any
 
 
-class ValidationError(Exception):
+class ValidationError(ValueError):
     """An input error that is safe to report to an API client."""
 
     def __init__(self, message: str, status_code: int = 400) -> None:
@@ -22,19 +24,34 @@ class ValidationError(Exception):
 
 
 def require_fields(payload: Mapping[str, Any], fields: Iterable[str]) -> None:
-    """Raise an error listing fields whose value is absent or an empty string."""
-    missing = [field for field in fields if payload.get(field) in (None, "")]
+    """Raise an error when a required value is absent or only whitespace.
+
+    A string containing spaces looks non-empty to Python, but it is empty from
+    a user's point of view.  Stripping only for this check lets callers retain
+    significant internal spaces while preventing blank names from being saved.
+    """
+    missing = [
+        field
+        for field in fields
+        if payload.get(field) is None
+        or (isinstance(payload.get(field), str) and not payload.get(field).strip())
+    ]
     if missing:
         raise ValidationError(f"Missing required fields: {', '.join(missing)}")
 
 
 def as_bool(value: Any, default: bool = False) -> bool:
-    """Convert common HTML/JSON truth values, using ``default`` when omitted."""
+    """Convert recognised HTML/JSON Boolean values and reject everything else."""
     if value is None or value == "":
         return default
     if isinstance(value, bool):
         return value
-    return str(value).strip().lower() in {"true", "1", "yes", "on"}
+    normalised = str(value).strip().lower()
+    if normalised in {"true", "1", "yes", "on"}:
+        return True
+    if normalised in {"false", "0", "no", "off"}:
+        return False
+    raise ValidationError("value must be a boolean.")
 
 
 def as_int(value: Any, field_name: str) -> int:
@@ -46,11 +63,19 @@ def as_int(value: Any, field_name: str) -> int:
 
 
 def as_float(value: Any, field_name: str) -> float:
-    """Convert a request value to a floating-point number."""
+    """Convert a request value to a finite floating-point number.
+
+    Python accepts special strings such as ``NaN`` and ``Infinity`` as floats.
+    Those values cannot represent real money or mileage and can poison totals,
+    so this shared boundary rejects them before they reach business logic.
+    """
     try:
-        return float(value)
+        converted = float(value)
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"{field_name} must be a number.") from exc
+    if not math.isfinite(converted):
+        raise ValidationError(f"{field_name} must be a finite number.")
+    return converted
 
 
 def as_date(value: Any, field_name: str = "date") -> date:
@@ -59,4 +84,53 @@ def as_date(value: Any, field_name: str = "date") -> date:
         return date.fromisoformat(str(value))
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"{field_name} must be a valid ISO date.") from exc
+
+
+def as_non_negative_int(value: Any, field_name: str) -> int:
+    """Return an integer that is zero or greater."""
+    converted = as_int(value, field_name)
+    if converted < 0:
+        raise ValidationError(f"{field_name} must be non-negative.")
+    return converted
+
+
+def as_non_negative_float(value: Any, field_name: str) -> float:
+    """Return a finite number that is zero or greater."""
+    converted = as_float(value, field_name)
+    if converted < 0:
+        raise ValidationError(f"{field_name} must be non-negative.")
+    return converted
+
+
+def as_optional_date(value: Any, field_name: str) -> str | None:
+    """Validate an optional ISO date and return its database-friendly text."""
+    if value is None or value == "":
+        return None
+    return as_date(value, field_name).isoformat()
+
+
+def as_text(value: Any, field_name: str, *, maximum: int, required: bool = False) -> str | None:
+    """Normalise a human-entered text field and enforce a storage limit."""
+    if value is None:
+        if required:
+            raise ValidationError(f"{field_name} is required.")
+        return None
+    converted = str(value).strip()
+    if required and not converted:
+        raise ValidationError(f"{field_name} is required.")
+    if not converted:
+        return None
+    if len(converted) > maximum:
+        raise ValidationError(f"{field_name} must be {maximum} characters or fewer.")
+    return converted
+
+
+def as_email(value: Any, field_name: str = "email") -> str | None:
+    """Validate a practical email shape without pretending to deliver mail."""
+    email = as_text(value, field_name, maximum=254)
+    if email is None:
+        return None
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise ValidationError(f"{field_name} must be a valid email address.")
+    return email
 

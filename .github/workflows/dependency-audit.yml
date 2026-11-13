@@ -3,6 +3,7 @@ name: Dependency audit
 on:
   pull_request:
     paths:
+      - "**.py"
       - "requirements.txt"
       - "requirements.in"
       - "static/vendor/**"
@@ -11,6 +12,7 @@ on:
       - ".github/workflows/dependency-audit.yml"
   push:
     paths:
+      - "**.py"
       - "requirements.txt"
       - "requirements.in"
       - "static/vendor/**"
@@ -34,10 +36,12 @@ jobs:
           python-version: "3.12"
       - name: Install locked application dependencies
         run: python -m pip install --require-hashes -r requirements.txt
-      - name: Install audit and SBOM tools
-        run: python -m pip install pip-audit==2.10.1 cyclonedx-bom==8.0.1
+      - name: Install pinned audit, static-analysis, and SBOM tools
+        run: python -m pip install pip-audit==2.10.1 bandit==1.8.6 cyclonedx-bom==8.0.1
       - name: Scan requirements
         run: pip-audit --requirement requirements.txt
+      - name: Scan application Python for insecure code patterns
+        run: bandit --ini .bandit --recursive club_gift_aid_manager app.py backup.py audit_export.py
       - name: Verify vendored assets
         run: sha256sum --check static/vendor/VENDORED-ASSETS.sha256
       - name: Scan Python and explicitly inventoried front-end dependencies

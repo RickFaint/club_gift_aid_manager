@@ -9,9 +9,20 @@ from flask import Blueprint
 
 from .shared import *  # noqa: F403 - shared view vocabulary is intentionally centralised
 from ..auth.decorators import roles_required
+from ..import_jobs import get_import, serialise_import
 
 
 blueprint = Blueprint("main", __name__)
+
+
+@blueprint.get("/imports/<job_id>")
+@roles_required(Role.ADMIN, Role.TREASURER, Role.VOLUNTEER)
+def import_status(job_id: str):
+    """Return background-import progress only to its submitting account."""
+    job = get_import(job_id, g.current_user["id"])
+    if job is None:
+        return jsonify({"error": "Import job not found."}), 404
+    return jsonify(serialise_import(job))
 
 @blueprint.get("/privacy-notice")
 def privacy_notice_current():

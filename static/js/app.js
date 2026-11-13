@@ -971,14 +971,15 @@ function attachDestinationImportForm() {
         ? await response.json()
         : await response.text();
       if (!response.ok) throw new Error(data.error || 'Unable to import locations.');
+      const completed = response.status === 202 ? await waitForImport(data.status_url) : data;
       form.reset();
       bootstrap.Modal.getOrCreateInstance(form.closest('.modal')).hide();
       await refreshPageData();
-      const skippedRows = data.skipped_duplicate_rows || [];
+      const skippedRows = completed.skipped_duplicate_rows || [];
       const skippedMessage = skippedRows.length
         ? ` ${skippedRows.length} duplicate CSV row${skippedRows.length === 1 ? '' : 's'} skipped: ${skippedRows.join(', ')}.`
         : '';
-      alert(`${data.imported} location${data.imported === 1 ? '' : 's'} imported successfully.${skippedMessage}`);
+      alert(`${completed.imported} location${completed.imported === 1 ? '' : 's'} imported successfully.${skippedMessage}`);
     } catch (error) {
       alert(error.message || 'Unable to import locations.');
     }
@@ -1026,14 +1027,30 @@ function attachTripImportForm() {
         }
         throw new Error(data.error || 'Unable to import trips.');
       }
+      const completed = response.status === 202 ? await waitForImport(data.status_url) : data;
       form.reset();
       bootstrap.Modal.getOrCreateInstance(form.closest('.modal')).hide();
       await refreshPageData();
-      alert(`${data.imported} trip${data.imported === 1 ? '' : 's'} imported successfully.`);
+      alert(`${completed.imported} trip${completed.imported === 1 ? '' : 's'} imported successfully.`);
     } catch (error) {
       alert(error.message || 'Unable to import trips.');
     }
   });
+}
+
+/** Poll a bounded background import until its worker returns the final result. */
+async function waitForImport(statusUrl) {
+  for (;;) {
+    const status = await api(statusUrl);
+    if (status.status === 'completed') return status.result;
+    if (status.status === 'failed') {
+      const error = new Error(status.result?.error || 'The import could not be completed.');
+      error.details = status.result?.errors || [];
+      throw error;
+    }
+    // A short delay avoids hammering the server while a route lookup is busy.
+    await new Promise((resolve) => window.setTimeout(resolve, 750));
+  }
 }
 
 /** Filter visible table rows locally according to the paired search input. */

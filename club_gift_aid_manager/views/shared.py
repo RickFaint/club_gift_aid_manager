@@ -17,7 +17,7 @@ from datetime import date, timedelta
 from getpass import getpass
 from pathlib import Path
 
-from flask import Flask, Response, g, jsonify, redirect, render_template, render_template_string, request, session, url_for
+from flask import Flask, Response, current_app, g, jsonify, redirect, render_template, render_template_string, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from club_gift_aid_manager.config import get_declaration_text
@@ -87,12 +87,57 @@ from club_gift_aid_manager.roles import Role
 from club_gift_aid_manager.validation import ValidationError, as_int
 
 
-from flask import current_app
+from club_gift_aid_manager.import_jobs import ImportQueueFull, submit_import
 
 MAX_PRIVACY_NOTICE_BYTES = 64 * 1024
 # A row cap complements Flask's byte-size cap.  It prevents a compact CSV with
 # thousands of tiny rows from monopolising a synchronous web worker.
 MAX_IMPORT_ROWS = 1000
+
+
+def queue_csv_import(kind: str, worker):
+    """Run an import now in tests or enqueue it for a background worker.
+
+    Flask's ``request`` and ``g`` objects only live for the current request.
+    Before returning HTTP 202 we therefore copy the uploaded bytes and the
+    authenticated user.  The worker creates a fresh request context around
+    those copies, so the existing, well-tested import transaction stays intact.
+    """
+    if current_app.config.get("IMPORTS_SYNCHRONOUS", False):
+        return worker()
+
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"error": "Select a CSV file to upload."}), 400
+    if not upload.filename.lower().endswith(".csv"):
+        return jsonify({"error": "The uploaded file must have a .csv extension."}), 400
+
+    filename = upload.filename
+    contents = upload.read()
+    application = current_app._get_current_object()
+    user = dict(g.current_user)
+
+    def perform_import():
+        # Multipart data is reconstructed inside the worker because an upload
+        # stream is closed when the original HTTP request ends.
+        with application.test_request_context(
+            method="POST",
+            data={"file": (io.BytesIO(contents), filename)},
+            content_type="multipart/form-data",
+        ):
+            g.current_user = user
+            response = application.make_response(worker())
+            return response.get_json(silent=True) or {"error": "The import returned an invalid response."}, response.status_code
+
+    try:
+        job = submit_import(user["id"], kind, perform_import)
+    except ImportQueueFull:
+        return jsonify({"error": "The import queue is busy. Try again shortly."}), 503
+    return jsonify({
+        "job_id": job.id,
+        "status": job.status,
+        "status_url": url_for("main.import_status", job_id=job.id),
+    }), 202
 DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_urlsafe(32))
 
 
