@@ -1,6 +1,9 @@
 const fieldHelpText = {
   'privacy-notice-editor': 'Enter the privacy and GDPR information to show to all users. Only administrators can edit and save it. Plain text, up to 64 KB.',
   notice: 'The privacy statement displayed to all users. Review it for accuracy and complete the club-specific details before saving.',
+  effective_date: 'The date this newly published privacy notice version takes effect.',
+  privacy_notice_version_id: 'The immutable privacy notice version shown when this declaration form was rendered.',
+  privacy_notice_sha256: 'The SHA-256 proof for the privacy notice version shown with this declaration.',
   'privacy-notice-file': 'Optionally choose a UTF-8 .txt file (up to 64 KB) to replace the privacy statement shown to all users. Only administrators can upload it.',
   'trips-date-from': 'Show trips on or after this trip date. Clear the field to remove the start-date limit.',
   'trips-date-to': 'Show trips on or before this trip date. Clear the field to remove the end-date limit.',

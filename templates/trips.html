@@ -1,5 +1,5 @@
-{% extends "base.html" %}
-{% block title %}Trips · Club Gift Aid Manager{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}Trips Â· Club Gift Aid Manager{% endblock %}
 {% block content %}
 {# Trip entry uses active saved locations, server-validated mileage, and consent. #}
 <div class="page-heading">
@@ -17,14 +17,14 @@
           <div class="form-text">
             Required columns: <code>origin_id</code>, <code>destination_id</code>, <code>trip_date</code> (YYYY-MM-DD), <code>vehicle_type</code> (car, motorcycle, bicycle), and <code>declaration_accepted</code> (yes).
             Optional columns: <code>return_trip</code> (yes/no), <code>passengers</code> (defaults to 0).
-            {% if current_user.role == 'admin' %}
+            {% if current_user.role == Role.ADMIN.value %}
             Admins must also provide either <code>person_id</code> or <code>person_name</code>. Person names must match exactly one record.
             {% else %}
             Trips are always assigned to your linked person record. Do not include person_id or person_name columns.
             {% endif %}
             Location columns use location IDs. Road distance is calculated from each location pair during import; any existing <code>miles_one_way</code> column is ignored. The full file is checked before any trips are saved.
           </div>
-          <a class="small" href="{{ url_for('trips_import_template') }}">Download CSV template</a>
+          <a class="small" href="{{ url_for('trips.trips_import_template') }}">Download CSV template</a>
           <div id="trip-import-errors" class="alert alert-danger mt-3 mb-0" role="alert" hidden></div>
         </div>
         <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Upload trips</button></div>
@@ -37,7 +37,7 @@
   <div class="card-body">
     {# Volunteers are assigned to their own person record on the server. #}
     <form id="trip-form" class="row g-3">
-      {% if current_user.role == 'admin' %}
+      {% if current_user.role == Role.ADMIN.value %}
       <div class="col-md-6"><label class="form-label" for="trip-person-select">Person</label><select class="form-select" name="person_id" id="trip-person-select" required></select></div>
       {% endif %}
       <div class="col-md-6"><label class="form-label" for="trip-origin-select">Origin</label><select class="form-select" name="origin_id" id="trip-origin-select" required><option value="">Select an origin</option></select><div class="form-text">Defaults to the club home ground when one is set.</div></div>
@@ -45,7 +45,7 @@
       <div class="col-md-6"><label class="form-label" for="trip-date">Trip date</label><input id="trip-date" class="form-control" type="date" name="trip_date" required /></div>
       <div class="col-md-4"><label class="form-label" for="trip-vehicle">Vehicle</label><select id="trip-vehicle" class="form-select" name="vehicle_type"><option value="car">Car / van</option><option value="motorcycle">Motorcycle</option><option value="bicycle">Bicycle</option></select></div>
       {# Route distance is read-only and filled by the public geocoder/router API. #}
-      <div class="col-md-4"><label class="form-label" for="trip-miles">One-way road miles</label><input id="trip-miles" class="form-control" type="number" step="0.1" min="0" name="miles_one_way" readonly required /><div class="form-text" id="trip-route-status" aria-live="polite">Select an origin and destination to calculate road mileage.</div><div class="form-text">Routing data: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>.</div></div>
+      <div class="col-md-4"><label class="form-label" for="trip-miles">One-way road miles</label><input id="trip-miles" class="form-control" type="number" step="0.1" min="0" name="miles_one_way" readonly required /><div class="form-text" id="trip-route-status" aria-live="polite">Select an origin and destination to calculate road mileage.</div><div class="form-text">Routing data: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">Â© OpenStreetMap contributors</a>.</div></div>
       <div class="col-md-4"><label class="form-label" for="trip-passengers">Fellow adult volunteers carried</label><input id="trip-passengers" class="form-control" type="number" min="0" name="passengers" value="0" /></div>
       <div class="col-12 form-check ms-2"><input class="form-check-input" type="checkbox" name="return_trip" id="return-trip" value="true" /><label class="form-check-label" for="return-trip">Return trip</label></div>
       <div class="col-12 form-check ms-2"><input class="form-check-input" type="checkbox" name="declaration_accepted" id="declaration-accepted" value="true" required /><label class="form-check-label" for="declaration-accepted">{{ declaration_text }}</label></div>
@@ -57,10 +57,10 @@
 <div class="card shadow-sm">
   <div class="table-toolbar">
     <div><h2 class="h6 mb-1">Trip history</h2><span class="table-count">Mileage submissions and claim details.</span></div>
-    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search trips…" aria-label="Search trips" data-table-search="trips-table-body" /></div></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">âŒ•</span><input class="form-control" type="search" placeholder="Search tripsâ€¦" aria-label="Search trips" data-table-search="trips-table-body" /></div></div>
   </div>
   <div class="table-responsive"><table class="table table-hover align-middle">
-    <thead><tr><th>Date</th><th>Person</th><th>Origin</th><th>Destination</th><th>Tax year</th><th>Vehicle</th><th>Miles</th><th>Declaration</th><th>Status</th>{% if current_user.role != 'volunteer' %}<th></th>{% endif %}</tr></thead>
+    <thead><tr><th>Date</th><th>Person</th><th>Origin</th><th>Destination</th><th>Tax year</th><th>Vehicle</th><th>Miles</th><th>Declaration</th><th>Status</th>{% if current_user.role != Role.VOLUNTEER.value %}<th></th>{% endif %}</tr></thead>
     <tbody id="trips-table-body"></tbody>
   </table></div>
 </div>
@@ -69,3 +69,4 @@
 <p>Submit one trip using the form, or upload a CSV to import several. Select active origin and destination locations; the one-way road distance is calculated automatically when both are selected.</p>
 <ul class="mb-0"><li>Accept the declaration to submit a claim.</li><li>Admins can select the person for a trip. Treasurers and volunteers are always assigned to their own linked person.</li><li>For CSV column names and formats, open Upload CSV. The entire file is checked before any trips are saved.</li></ul>
 {% endblock %}
+

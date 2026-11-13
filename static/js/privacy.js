@@ -3,6 +3,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const editorForm = document.getElementById('privacy-notice-editor-form');
   const uploadForm = document.getElementById('privacy-notice-upload-form');
   const editor = document.getElementById('privacy-notice-editor');
+  const effectiveDate = document.getElementById('privacy-notice-effective-date');
   const status = document.getElementById('privacy-notice-status');
 
   const saveNotice = async (event, form, isUpload) => {
@@ -16,7 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const body = isUpload
         ? new FormData(form)
-        : JSON.stringify({ notice: editor.value });
+        : JSON.stringify({ notice: editor.value, effective_date: effectiveDate?.value });
       const response = await fetch('/admin/privacy-notice', {
         method: 'POST',
         headers: {
@@ -35,7 +36,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (content) content.textContent = data.notice;
       if (editor) editor.value = data.notice;
       if (uploadForm) uploadForm.reset();
-      reportStatus('Privacy statement updated for all pages.', false);
+      reportStatus(`Privacy statement version ${data.version.id} published.`, false);
     } catch (error) {
       reportError(error.message || 'Unable to update the privacy statement.');
     }

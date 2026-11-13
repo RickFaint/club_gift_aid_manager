@@ -1,3 +1,11 @@
+// Keep browser-side display decisions aligned with the Python Role enum.  The
+// server remains authoritative for every permission check.
+const Role = Object.freeze({
+  ADMIN: 'admin',
+  TREASURER: 'treasurer',
+  VOLUNTEER: 'volunteer',
+});
+
 // Shared client-side state: each page loads only the records needed by its view.
 // Request counters prevent older async responses from overwriting newer choices.
 const currencyFormatter = new Intl.NumberFormat('en-GB', {
@@ -7,6 +15,7 @@ const currencyFormatter = new Intl.NumberFormat('en-GB', {
 });
 
 const state = { people: [], trips: [], destinations: [], declarations: [], donations: [], payments: [], reconciliation: [], users: [], audit: [] };
+const appRole = document.body.dataset.role || '';
 let routeRequestSequence = 0;
 let paymentAmountRequestSequence = 0;
 
@@ -174,7 +183,7 @@ function renderSummary(summary) {
 function renderDashboardOverview(overview) {
   const actions = document.getElementById('dashboard-next-steps');
   if (actions) {
-    if (window.APP_ROLE === 'volunteer') {
+    if (appRole === Role.VOLUNTEER) {
       const recentTrips = overview.recent_trips || [];
       const recentList = recentTrips.length
         ? `<ul class="dashboard-recent-list mb-0">${recentTrips.map((trip) => `
@@ -342,7 +351,7 @@ function fillPersonSelects() {
 function renderPeople() {
   const body = document.getElementById('people-table-body');
   if (!body) return;
-  const canManage = window.APP_ROLE === 'admin' || window.APP_ROLE === 'treasurer';
+  const canManage = appRole === Role.ADMIN || appRole === Role.TREASURER;
   const count = document.getElementById('people-count-label');
   if (count) count.textContent = `${state.people.length} record${state.people.length === 1 ? '' : 's'}`;
   body.innerHTML = state.people.length
@@ -366,7 +375,7 @@ function renderPeople() {
 function renderTrips() {
   const body = document.getElementById('trips-table-body');
   if (!body) return;
-  const canManage = window.APP_ROLE !== 'volunteer';
+  const canManage = appRole !== Role.VOLUNTEER;
   body.innerHTML = state.trips.length
     ? state.trips.map((trip) => `
       <tr>
@@ -666,7 +675,7 @@ async function loadFinancialReport() {
 /** Fill volunteer controls from the people directory while preserving selections. */
 function fillReportVolunteerFilters() {
   const volunteers = state.people
-    .filter((person) => person.role === 'volunteer')
+    .filter((person) => person.role === Role.VOLUNTEER)
     .sort((left, right) => left.name.localeCompare(right.name));
   const controls = [
     document.getElementById('summary-volunteer-filter'),
@@ -879,7 +888,7 @@ function attachForm(formId, endpoint, afterSave = refreshPageData) {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const payload = Object.fromEntries(new FormData(form).entries());
-    if (formId === 'user-form' && payload.role === 'admin') delete payload.person_id;
+    if (formId === 'user-form' && payload.role === Role.ADMIN) delete payload.person_id;
     if (formId === 'donation-form') {
       payload.linked_payment_ids = Array.from(
         document.getElementById('donation-payment-select')?.selectedOptions || [],
@@ -1044,7 +1053,7 @@ async function refreshPageData() {
   await loadPeople();
   if (page === 'mileage_rates_page') return loadMileageRateSchedules();
   if (page === 'index') {
-    if (window.APP_ROLE !== 'volunteer') {
+    if (appRole !== Role.VOLUNTEER) {
       const summary = await api('/reports/summary');
       renderSummary(summary);
     }
@@ -1158,7 +1167,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const userRole = document.getElementById('user-role-select');
   const personField = document.getElementById('user-person-field');
   if (userRole && personField) {
-    const updateVisibility = () => personField.classList.toggle('d-none', userRole.value === 'admin');
+    const updateVisibility = () => personField.classList.toggle('d-none', userRole.value === Role.ADMIN);
     userRole.addEventListener('change', updateVisibility);
     updateVisibility();
   }

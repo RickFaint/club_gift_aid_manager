@@ -1,13 +1,13 @@
-{% extends "base.html" %}
-{% block title %}Reports · Club Gift Aid Manager{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}Reports Â· Club Gift Aid Manager{% endblock %}
 {% block content %}
 <div class="page-heading">
   <div><h1>Financial and mileage report</h1><p>Club-wide totals and a per-volunteer activity summary.</p></div>
 </div>
 <section class="row g-3 mb-4" aria-label="Club-wide financial totals">
-  <div class="col-sm-6 col-xl-4"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Expenses paid</div><div class="metric-value" id="report-expenses-paid">—</div><div class="metric-note">Recorded reimbursement payments</div></div></div></div>
-  <div class="col-sm-6 col-xl-4"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Donations</div><div class="metric-value" id="report-donations">—</div><div class="metric-note">Active donations</div></div></div></div>
-  <div class="col-sm-6 col-xl-4"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Gift Aid amount</div><div class="metric-value" id="report-gift-aid">—</div><div class="metric-note">25% of active donations marked eligible</div></div></div></div>
+  <div class="col-sm-6 col-xl-4"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Expenses paid</div><div class="metric-value" id="report-expenses-paid">â€”</div><div class="metric-note">Recorded reimbursement payments</div></div></div></div>
+  <div class="col-sm-6 col-xl-4"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Donations</div><div class="metric-value" id="report-donations">â€”</div><div class="metric-note">Active donations</div></div></div></div>
+  <div class="col-sm-6 col-xl-4"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Gift Aid amount</div><div class="metric-value" id="report-gift-aid">â€”</div><div class="metric-note">25% of active donations marked eligible</div></div></div></div>
 </section>
 <div class="card">
   <div class="table-toolbar flex-wrap">
@@ -17,7 +17,7 @@
   <div class="table-responsive">
     <table class="table table-hover align-middle" id="financial-report-table">
       <thead><tr><th>Volunteer</th><th class="text-end">Trips</th><th class="text-end">Total miles</th><th class="text-end">Expenses paid</th><th class="text-end">Donations</th><th class="text-end">Difference</th></tr></thead>
-      <tbody id="financial-report-table-body"><tr><td colspan="6" class="empty-state">Loading report…</td></tr></tbody>
+      <tbody id="financial-report-table-body"><tr><td colspan="6" class="empty-state">Loading reportâ€¦</td></tr></tbody>
     </table>
   </div>
   <div class="px-3 pb-2"><span class="form-text" id="summary-filter-status" aria-live="polite"></span></div>
@@ -71,7 +71,7 @@
   <div class="table-responsive">
     <table class="table table-hover align-middle" id="{{ report.key }}-report-table">
       <thead><tr>{% for header in report.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead>
-      <tbody id="{{ report.key }}-report-table-body"><tr><td colspan="{{ report.columns }}" class="empty-state" data-empty-row>Loading records…</td></tr></tbody>
+      <tbody id="{{ report.key }}-report-table-body"><tr><td colspan="{{ report.columns }}" class="empty-state" data-empty-row>Loading recordsâ€¦</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -82,3 +82,4 @@
 <p>This report summarizes recorded reimbursement payments, active donations, estimated Gift Aid, and trip mileage by volunteer.</p>
 <ul class="mb-0"><li>Expenses paid are the total of payment records.</li><li>Gift Aid is estimated as 25% of active donations marked eligible.</li><li>Use the volunteer selector on each section. Trips can also be filtered by date, tax year, vehicle, and status; donations by date, Gift Aid eligibility, status, and method; and payments by date, related donations, and method.</li><li>Export CSV downloads only the rows currently visible in that table.</li><li>The financial total cards remain club-wide; the volunteer summary and detail tables can be filtered independently.</li><li>The volunteer difference is expenses paid minus donations and is informational only; it does not change either record.</li></ul>
 {% endblock %}
+

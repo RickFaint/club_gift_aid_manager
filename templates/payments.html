@@ -1,16 +1,16 @@
-{% extends "base.html" %}
-{% block title %}Payments · Club Gift Aid Manager{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}Payments Â· Club Gift Aid Manager{% endblock %}
 {% block content %}
 {# Payments record completed reimbursements and display a separate reconciliation. #}
 <div class="page-heading">
   <div><h1>Payments</h1><p>Mileage reimbursements paid to volunteers, separate from donations.</p></div>
-  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#payment-modal"><span class="me-1">＋</span> Record payment</button>
+  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#payment-modal"><span class="me-1">ï¼‹</span> Record payment</button>
 </div>
 {# This report compares payments with donations explicitly linked for tracking. #}
 <div class="card mb-4">
   <div class="table-toolbar">
     <div><h2 class="h6 mb-1">Volunteer reconciliation</h2><span class="table-count">Payments compared with linked donations; each donation counts once per person.</span></div>
-    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search volunteers…" aria-label="Search volunteer reconciliation" data-table-search="reconciliation-table-body" /></div></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">âŒ•</span><input class="form-control" type="search" placeholder="Search volunteersâ€¦" aria-label="Search volunteer reconciliation" data-table-search="reconciliation-table-body" /></div></div>
   </div>
   <div class="table-responsive"><table class="table table-hover align-middle">
     <thead><tr><th>Volunteer</th><th>Payments</th><th>Donations linked back</th><th>Difference</th><th>Records</th></tr></thead>
@@ -21,7 +21,7 @@
 <div class="card">
   <div class="table-toolbar">
     <div><h2 class="h6 mb-1">Reimbursement payments</h2><span class="table-count">Payments made to volunteers.</span></div>
-    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search payments…" aria-label="Search payments" data-table-search="payments-table-body" /></div></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">âŒ•</span><input class="form-control" type="search" placeholder="Search paymentsâ€¦" aria-label="Search payments" data-table-search="payments-table-body" /></div></div>
   </div>
   <div class="table-responsive"><table class="table table-hover align-middle">
     <thead><tr><th>Person</th><th>Reimbursement paid</th><th>Paid date</th><th>Method</th><th>Reference</th><th>Trips reimbursed</th><th>Related donations (reference only)</th></tr></thead>
@@ -50,3 +50,4 @@
 <p>Record completed mileage reimbursements and review reconciliation. Donations and reimbursements remain separate records.</p>
 <ul class="mb-0"><li>Select a person to see their unpaid trips.</li><li>Selected trips determine the full reimbursement amount; a trip can be included in only one payment.</li><li>A donation may be linked to multiple payments as a reference. It is not allocated or deducted from any payment, and counts once in person-level reconciliation.</li></ul>
 {% endblock %}
+

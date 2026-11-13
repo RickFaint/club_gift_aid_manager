@@ -1,30 +1,30 @@
-{% extends "base.html" %}
-{% block title %}People · Club Gift Aid Manager{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}People Â· Club Gift Aid Manager{% endblock %}
 {% block content %}
 {# The directory is populated by the people API; volunteers see only themselves. #}
 <div class="page-heading">
   <div><h1>People</h1><p>Manage volunteer, parent, coach, and contact records. Anonymizing a person removes identifying details but retains trip and financial history.</p></div>
-  {% if current_user.role in ('admin', 'treasurer') %}
-  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#person-modal"><span class="me-1">＋</span> Add person</button>
+  {% if current_user.role in (Role.ADMIN.value, Role.TREASURER.value) %}
+  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#person-modal"><span class="me-1">ï¼‹</span> Add person</button>
   {% endif %}
 </div>
 {# Search filters the already-loaded rows in the browser. #}
 <div class="card">
   <div class="table-toolbar">
-    <div><h2 class="h6 mb-1">People directory</h2><span class="table-count" id="people-count-label">Loading records…</span></div>
+    <div><h2 class="h6 mb-1">People directory</h2><span class="table-count" id="people-count-label">Loading recordsâ€¦</span></div>
     <div class="table-search">
-      <div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search people…" aria-label="Search people" data-table-search="people-table-body" /></div>
+      <div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">âŒ•</span><input class="form-control" type="search" placeholder="Search peopleâ€¦" aria-label="Search people" data-table-search="people-table-body" /></div>
     </div>
   </div>
   <div class="table-responsive">
     <table class="table table-hover align-middle">
-      <thead><tr><th>Name</th><th>Role</th><th>Email</th><th>Phone</th><th>Status</th>{% if current_user.role in ('admin','treasurer') %}<th class="text-end">Actions</th>{% endif %}</tr></thead>
+      <thead><tr><th>Name</th><th>Role</th><th>Email</th><th>Phone</th><th>Status</th>{% if current_user.role in (Role.ADMIN.value, Role.TREASURER.value) %}<th class="text-end">Actions</th>{% endif %}</tr></thead>
       <tbody id="people-table-body"></tbody>
     </table>
   </div>
 </div>
 
-{% if current_user.role in ('admin', 'treasurer') %}
+{% if current_user.role in (Role.ADMIN.value, Role.TREASURER.value) %}
 {# Staff-only modal posts new contact details to the people endpoint. #}
 <div class="modal fade" id="person-modal" tabindex="-1" aria-labelledby="person-modal-title" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered">
@@ -74,3 +74,4 @@
 <p>Use the People directory to find club contacts and review their status. The search box filters the displayed records.</p>
 <p class="mb-0">Admins and treasurers can add, edit, or remove people. Volunteers can view only their own linked person record.</p>
 {% endblock %}
+

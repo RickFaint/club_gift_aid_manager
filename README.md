@@ -1,6 +1,6 @@
 # Club Gift Aid Manager
 
-This project is a small but fuller CRUD-oriented Python implementation of the rugby club volunteer mileage and gift-aid workflow.
+This project is a small CRUD-oriented Python implementation of the club volunteer mileage and gift-aid workflow.
 
 It includes:
 
@@ -18,7 +18,7 @@ It includes:
 ## Run tests
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.txt
 python -m pytest -q
 ```
 
@@ -47,6 +47,8 @@ Set a stable, secret session key before starting the application. On PowerShell:
 ```powershell
 $env:CLUB_GIFT_AID_SECRET = "a-long-random-secret-value"
 $env:CLUB_GIFT_AID_COOKIE_SECURE = "true"
+$env:GIFT_AID_ENC_KEY = "a-generated-fernet-key"
+$env:GIFT_AID_BLIND_INDEX_KEY = "a-separate-base64-encoded-32-byte-key"
 python app.py
 ```
 
@@ -54,7 +56,7 @@ Use HTTPS when `CLUB_GIFT_AID_COOKIE_SECURE=true`. The application enables datab
 
 For production, set `CLUB_GIFT_AID_ENV=production`, supply a stable secret of at least 32 characters in `CLUB_GIFT_AID_SECRET`, set `CLUB_GIFT_AID_DB` to an absolute persistent path outside the source checkout, enable HTTPS, and set `CLUB_GIFT_AID_COOKIE_SECURE=true`. The application refuses to start in production without these settings; it also refuses to start its development server in production. State-changing requests and their audit records are committed in one SQLite transaction. Login failures are throttled with short-lived counters keyed by HMACs of the source address and username; the raw values are not stored. SQLite files receive owner-only permissions on POSIX hosts.
 
-SQLite is not encrypted by the application. Hosting, encryption at rest, backup encryption, file permissions, restoration testing, incident response, and an approved retention schedule remain the club/operator's responsibility. Review [SECURITY-OPERATIONS.md](./SECURITY-OPERATIONS.md) before deployment. The provided privacy notice uses a policy-led retention statement, but still needs the club's controller/contact, lawful basis, and other marked details completed and reviewed before use.
+Sensitive SQLite fields are encrypted using keys supplied outside the repository. Key custody, provider controls, backup access, restoration testing, incident response, and an approved retention schedule remain the club/operator's responsibility. Existing plaintext development databases are not migrated and must be deleted and recreated. Review [SECURITY-OPERATIONS.md](./SECURITY-OPERATIONS.md) before deployment. The provided privacy notice uses a policy-led retention statement, but still needs the club's controller/contact, lawful basis, and other marked details completed and reviewed before use.
 
 ## Roles
 

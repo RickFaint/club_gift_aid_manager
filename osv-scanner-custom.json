@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "packages": [
+        {
+          "package": {
+            "name": "bootstrap",
+            "version": "5.3.3",
+            "ecosystem": "npm"
+          }
+        }
+      ]
+    }
+  ]
+}

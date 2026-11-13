@@ -1,16 +1,16 @@
-{% extends "base.html" %}
-{% block title %}Gift Aid declarations · Club Gift Aid Manager{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}Gift Aid declarations Â· Club Gift Aid Manager{% endblock %}
 {% block content %}
 {# Declarations are maintained independently and may be linked from donations. #}
 <div class="page-heading">
   <div><h1>Gift Aid declarations</h1><p>Record declarations separately from donations.</p></div>
-  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#declaration-modal"><span class="me-1">＋</span> Add declaration</button>
+  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#declaration-modal"><span class="me-1">ï¼‹</span> Add declaration</button>
 </div>
 {# The table shows declaration status and scope without changing the evidence. #}
 <div class="card">
   <div class="table-toolbar">
     <div><h2 class="h6 mb-1">Declaration records</h2><span class="table-count">Search and review submitted declarations.</span></div>
-    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search declarations…" aria-label="Search declarations" data-table-search="declarations-table-body" /></div></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">âŒ•</span><input class="form-control" type="search" placeholder="Search declarationsâ€¦" aria-label="Search declarations" data-table-search="declarations-table-body" /></div></div>
   </div>
   <div class="table-responsive"><table class="table table-hover align-middle">
     <thead><tr><th>Person</th><th>Full name</th><th>Postcode</th><th>Date</th><th>Scope</th><th>Withdrawn</th><th>Status</th><th></th></tr></thead>
@@ -42,6 +42,8 @@
 <div class="modal fade" id="declaration-modal" tabindex="-1" aria-labelledby="declaration-modal-title" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content">
     <form id="declaration-form">
+      <input type="hidden" name="privacy_notice_version_id" value="{{ privacy_notice_version.id }}" />
+      <input type="hidden" name="privacy_notice_sha256" value="{{ privacy_notice_version.text_sha256 }}" />
       <div class="modal-header"><div><h2 class="modal-title fs-5" id="declaration-modal-title">Add declaration</h2><p class="text-muted small mb-0">Capture the donor's declaration details.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
       <div class="modal-body"><div class="row g-3">
         <div class="col-md-6"><label class="form-label" for="declaration-person-select">Person</label><select class="form-select" name="person_id" id="declaration-person-select" required></select></div>
@@ -61,3 +63,4 @@
 <p>Record a donor's Gift Aid declaration independently from donations. Select the linked person and enter the name and declaration details as provided.</p>
 <p class="mb-0">Use the scope to record which donations the declaration covers. An evidence reference can help locate the signed or recorded declaration later. Making a declaration dormant keeps its history and donation links; restore it from Edit if needed.</p>
 {% endblock %}
+

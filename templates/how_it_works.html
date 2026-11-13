@@ -1,5 +1,5 @@
-{% extends "base.html" %}
-{% block title %}How it works · Club Gift Aid Manager{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}How it works Â· Club Gift Aid Manager{% endblock %}
 {% block content %}
 <div class="page-heading">
   <div>
@@ -10,18 +10,18 @@
 </div>
 
 <ul class="nav nav-tabs guide-tabs mb-4" role="tablist" aria-label="Choose a guide">
-  {% if current_user.role == 'admin' %}
+  {% if current_user.role == Role.ADMIN.value %}
   <li class="nav-item" role="presentation">
     <button class="nav-link active" id="admin-guide-tab" data-bs-toggle="tab" data-bs-target="#admin-guide" type="button" role="tab" aria-controls="admin-guide" aria-selected="true">Admin guide</button>
   </li>
   {% endif %}
   <li class="nav-item" role="presentation">
-    <button class="nav-link {{ 'active' if current_user.role != 'admin' else '' }}" id="user-guide-tab" data-bs-toggle="tab" data-bs-target="#user-guide" type="button" role="tab" aria-controls="user-guide" aria-selected="{{ 'true' if current_user.role != 'admin' else 'false' }}">User guide</button>
+    <button class="nav-link {{ 'active' if current_user.role != Role.ADMIN.value else '' }}" id="user-guide-tab" data-bs-toggle="tab" data-bs-target="#user-guide" type="button" role="tab" aria-controls="user-guide" aria-selected="{{ 'true' if current_user.role != Role.ADMIN.value else 'false' }}">User guide</button>
   </li>
 </ul>
 
 <div class="tab-content">
-  {% if current_user.role == 'admin' %}
+  {% if current_user.role == Role.ADMIN.value %}
   <section class="tab-pane fade show active" id="admin-guide" role="tabpanel" aria-labelledby="admin-guide-tab" tabindex="0">
     <div class="card guide-card mb-4">
       <div class="card-body">
@@ -69,8 +69,8 @@
           <div class="card-body">
             <h3 class="h5">3. Review reports and changes</h3>
             <p>The admin-only <strong>Reports</strong> page summarizes trips, donations, payments, and volunteer totals. Filters affect the related table; CSV export downloads the rows currently shown in that table. Club-wide total cards are not changed by table filters.</p>
-            <p>Gift Aid in reports is an estimate, not a tax claim. The audit log shows who acted, when, the record involved, and changed field names—it does not show the old or new values.</p>
-            <p class="mb-0">Use <strong>Privacy / GDPR</strong> to review the club notice shown to users. An admin can replace it with a UTF-8 text file up to 64 KB.</p>
+            <p>Gift Aid in reports is an estimate, not a tax claim. The audit log shows who acted, when, the record involved, and changed field namesâ€”it does not show the old or new values.</p>
+            <p class="mb-0">Use <strong>Privacy / GDPR</strong> to review the club notice shown to users. An admin can publish a new immutable version from text or a UTF-8 text file up to 64 KB.</p>
           </div>
         </article>
       </div>
@@ -91,7 +91,7 @@
   </section>
   {% endif %}
 
-  <section class="tab-pane fade {{ 'show active' if current_user.role != 'admin' else '' }}" id="user-guide" role="tabpanel" aria-labelledby="user-guide-tab" tabindex="0">
+  <section class="tab-pane fade {{ 'show active' if current_user.role != Role.ADMIN.value else '' }}" id="user-guide" role="tabpanel" aria-labelledby="user-guide-tab" tabindex="0">
     <div class="card guide-card mb-4">
       <div class="card-body">
         <span class="guide-kicker">USER GUIDE</span>
@@ -200,12 +200,12 @@
       <div class="card-body">
         <h2 class="h4">Official guidance and useful references</h2>
         <ul class="mb-3">
-          <li><a href="https://www.gov.uk/claim-gift-aid" target="_blank" rel="noopener noreferrer">HMRC: Claiming Gift Aid</a> — overview of eligibility and claims.</li>
-          <li><a href="https://www.gov.uk/claim-gift-aid/gift-aid-declarations" target="_blank" rel="noopener noreferrer">HMRC: Gift Aid declarations</a> — declaration details and record keeping.</li>
-          <li><a href="https://www.gov.uk/claim-gift-aid/what-you-can-claim-it-on" target="_blank" rel="noopener noreferrer">HMRC: What you can claim Gift Aid on</a> — donations that do and do not qualify.</li>
-          <li><a href="https://www.gov.uk/expenses-and-benefits-business-travel-mileage/rules-for-tax" target="_blank" rel="noopener noreferrer">HMRC: Mileage allowance payments</a> — employee mileage tax rules and rates.</li>
-          <li><a href="https://www.gov.uk/government/publications/internal-financial-controls-for-charities-cc8" target="_blank" rel="noopener noreferrer">Charity Commission: Internal financial controls (CC8)</a> — financial controls for charities in England and Wales.</li>
-          <li><a href="https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/individual-rights/the-right-to-be-informed/" target="_blank" rel="noopener noreferrer">ICO: The right to be informed</a> — privacy notices and information for people.</li>
+          <li><a href="https://www.gov.uk/claim-gift-aid" target="_blank" rel="noopener noreferrer">HMRC: Claiming Gift Aid</a> â€” overview of eligibility and claims.</li>
+          <li><a href="https://www.gov.uk/claim-gift-aid/gift-aid-declarations" target="_blank" rel="noopener noreferrer">HMRC: Gift Aid declarations</a> â€” declaration details and record keeping.</li>
+          <li><a href="https://www.gov.uk/claim-gift-aid/what-you-can-claim-it-on" target="_blank" rel="noopener noreferrer">HMRC: What you can claim Gift Aid on</a> â€” donations that do and do not qualify.</li>
+          <li><a href="https://www.gov.uk/expenses-and-benefits-business-travel-mileage/rules-for-tax" target="_blank" rel="noopener noreferrer">HMRC: Mileage allowance payments</a> â€” employee mileage tax rules and rates.</li>
+          <li><a href="https://www.gov.uk/government/publications/internal-financial-controls-for-charities-cc8" target="_blank" rel="noopener noreferrer">Charity Commission: Internal financial controls (CC8)</a> â€” financial controls for charities in England and Wales.</li>
+          <li><a href="https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/individual-rights/the-right-to-be-informed/" target="_blank" rel="noopener noreferrer">ICO: The right to be informed</a> â€” privacy notices and information for people.</li>
         </ul>
         <p class="small text-muted mb-0">These are reference links, not tax or legal advice. Check which rules apply to your club and jurisdiction. Administrators can maintain dated rates on the Mileage rates page; each trip uses the schedule effective on the date it occurred, not the date it was entered. Before the first scheduled change, the app uses its original default rates: 45p per mile for the first 10,000 car miles, then 25p; 24p for motorcycles; and 20p for bicycles, plus a passenger amount. HMRC's employee mileage rules may differ, including rates that change over time. Ask the club to confirm its rates and seek professional advice where needed.</p>
       </div>
@@ -213,3 +213,4 @@
   </div>
 </section>
 {% endblock %}
+

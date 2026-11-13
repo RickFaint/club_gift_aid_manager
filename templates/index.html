@@ -1,58 +1,58 @@
-{% extends "base.html" %}
-{% block title %}Dashboard · Club Gift Aid Manager{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}Dashboard Â· Club Gift Aid Manager{% endblock %}
 {% block content %}
 {# The dashboard title and trip action are available to all authenticated roles. #}
 <div class="page-heading">
   <div><span class="eyebrow">CLUB WORKSPACE</span><h1 class="mt-2">Welcome, {{ current_user.username }}</h1><p>Your club mileage and Gift Aid workspace.</p></div>
-  <a class="btn btn-primary px-3" href="{{ url_for('trips_page') }}">Submit a trip <span class="ms-1">→</span></a>
+  <a class="btn btn-primary px-3" href="{{ url_for('trips.trips_page') }}">Submit a trip <span class="ms-1">â†’</span></a>
 </div>
-{% if current_user.role in ('admin', 'treasurer') %}
+{% if current_user.role in (Role.ADMIN.value, Role.TREASURER.value) %}
 {# Financial metrics are intentionally not rendered for volunteer accounts. #}
 <section class="row g-3 mb-4">
-  <div class="col-sm-6 col-xl-3"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">People</div><div class="metric-value" id="people-count">—</div><div class="metric-note">Club contacts</div></div></div></div>
-  <div class="col-sm-6 col-xl-3"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Trips logged</div><div class="metric-value" id="trips-count">—</div><div class="metric-note">Mileage claims</div></div></div></div>
-  <div class="col-sm-6 col-xl-3"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Donations</div><div class="metric-value" id="donations-total">£0.00</div><div class="metric-note">Voluntary contributions</div></div></div></div>
-  <div class="col-sm-6 col-xl-3"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Reimbursements</div><div class="metric-value" id="payments-total">£0.00</div><div class="metric-note">Payments to volunteers</div></div></div></div>
+  <div class="col-sm-6 col-xl-3"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">People</div><div class="metric-value" id="people-count">â€”</div><div class="metric-note">Club contacts</div></div></div></div>
+  <div class="col-sm-6 col-xl-3"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Trips logged</div><div class="metric-value" id="trips-count">â€”</div><div class="metric-note">Mileage claims</div></div></div></div>
+  <div class="col-sm-6 col-xl-3"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Donations</div><div class="metric-value" id="donations-total">Â£0.00</div><div class="metric-note">Voluntary contributions</div></div></div></div>
+  <div class="col-sm-6 col-xl-3"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Reimbursements</div><div class="metric-value" id="payments-total">Â£0.00</div><div class="metric-note">Payments to volunteers</div></div></div></div>
 </section>
 <div class="section-heading"><h2 class="h5 mb-0">Next steps</h2><span class="text-muted small">Record checks and shortcuts for your role</span></div>
 <section class="row g-3 mb-4" id="dashboard-next-steps" aria-live="polite">
-  <div class="col-12"><p class="text-muted">Loading your next steps…</p></div>
+  <div class="col-12"><p class="text-muted">Loading your next stepsâ€¦</p></div>
 </section>
-{% if current_user.role == 'admin' %}
+{% if current_user.role == Role.ADMIN.value %}
 <section class="card dashboard-action-card mb-4">
   <div class="card-body">
     <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
       <div><h2 class="h5 mb-1">Recent activity</h2><p class="text-muted small mb-0">Latest changes recorded in the audit log.</p></div>
-      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('audit_page') }}">Open audit log</a>
+      <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('admin.audit_page') }}">Open audit log</a>
     </div>
     <ul class="dashboard-activity-list mt-3 mb-0" id="dashboard-recent-activity" aria-live="polite">
-      <li class="text-muted">Loading recent activity…</li>
+      <li class="text-muted">Loading recent activityâ€¦</li>
     </ul>
   </div>
 </section>
 {% endif %}
 {% else %}
 {# Volunteers see a privacy-specific message instead of club-wide finance totals. #}
-<div class="volunteer-welcome card mb-4"><div class="card-body"><div class="welcome-icon">✓</div><div><h2 class="h5 mb-1">Your volunteer account</h2><p class="text-muted mb-0">Submit a mileage claim or review your own trips. Your records are private to you.</p></div><a class="btn btn-primary ms-lg-auto" href="{{ url_for('trips_page') }}">View my trips</a></div></div>
+<div class="volunteer-welcome card mb-4"><div class="card-body"><div class="welcome-icon">âœ“</div><div><h2 class="h5 mb-1">Your volunteer account</h2><p class="text-muted mb-0">Submit a mileage claim or review your own trips. Your records are private to you.</p></div><a class="btn btn-primary ms-lg-auto" href="{{ url_for('trips.trips_page') }}">View my trips</a></div></div>
 <div class="section-heading"><h2 class="h5 mb-0">Your next step</h2><span class="text-muted small">Only your trip information is shown here</span></div>
 <section class="row g-3 mb-4" id="dashboard-next-steps" aria-live="polite">
-  <div class="col-12"><p class="text-muted">Loading your trip history…</p></div>
+  <div class="col-12"><p class="text-muted">Loading your trip historyâ€¦</p></div>
 </section>
 {% endif %}
 {# Workspace cards are shortcuts; the navigation and endpoints still enforce roles. #}
 <div class="section-heading"><h2 class="h5 mb-0">Workspace</h2><span class="text-muted small">Choose a section to manage</span></div>
 <section class="row g-3">
-  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('people_page') }}"><div class="card-body"><span class="dashboard-icon">P</span><div><h3>People</h3><p>Volunteer and contact records</p></div><span class="dashboard-arrow">→</span></div></a></div>
-  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('trips_page') }}"><div class="card-body"><span class="dashboard-icon">T</span><div><h3>Trips</h3><p>Mileage submissions and history</p></div><span class="dashboard-arrow">→</span></div></a></div>
-  {% if current_user.role in ('admin', 'treasurer') %}
-  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('destinations_page') }}"><div class="card-body"><span class="dashboard-icon">L</span><div><h3>Locations</h3><p>Club grounds and opponents</p></div><span class="dashboard-arrow">→</span></div></a></div>
-  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('declarations_page') }}"><div class="card-body"><span class="dashboard-icon">G</span><div><h3>Gift Aid declarations</h3><p>Declaration records and scope</p></div><span class="dashboard-arrow">→</span></div></a></div>
-  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('donations_page') }}"><div class="card-body"><span class="dashboard-icon">D</span><div><h3>Donations</h3><p>Separate voluntary donations</p></div><span class="dashboard-arrow">→</span></div></a></div>
-  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('payments_page') }}"><div class="card-body"><span class="dashboard-icon">£</span><div><h3>Payments</h3><p>Mileage reimbursement payments</p></div><span class="dashboard-arrow">→</span></div></a></div>
+  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('people.people_page') }}"><div class="card-body"><span class="dashboard-icon">P</span><div><h3>People</h3><p>Volunteer and contact records</p></div><span class="dashboard-arrow">â†’</span></div></a></div>
+  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('trips.trips_page') }}"><div class="card-body"><span class="dashboard-icon">T</span><div><h3>Trips</h3><p>Mileage submissions and history</p></div><span class="dashboard-arrow">â†’</span></div></a></div>
+  {% if current_user.role in (Role.ADMIN.value, Role.TREASURER.value) %}
+  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('destinations.destinations_page') }}"><div class="card-body"><span class="dashboard-icon">L</span><div><h3>Locations</h3><p>Club grounds and opponents</p></div><span class="dashboard-arrow">â†’</span></div></a></div>
+  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('finance.declarations_page') }}"><div class="card-body"><span class="dashboard-icon">G</span><div><h3>Gift Aid declarations</h3><p>Declaration records and scope</p></div><span class="dashboard-arrow">â†’</span></div></a></div>
+  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('finance.donations_page') }}"><div class="card-body"><span class="dashboard-icon">D</span><div><h3>Donations</h3><p>Separate voluntary donations</p></div><span class="dashboard-arrow">â†’</span></div></a></div>
+  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('finance.payments_page') }}"><div class="card-body"><span class="dashboard-icon">Â£</span><div><h3>Payments</h3><p>Mileage reimbursement payments</p></div><span class="dashboard-arrow">â†’</span></div></a></div>
   {% endif %}
-  {% if current_user.role == 'admin' %}
-  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('reports_page') }}"><div class="card-body"><span class="dashboard-icon">R</span><div><h3>Reports</h3><p>Expenses, donations, Gift Aid, and volunteer mileage</p></div><span class="dashboard-arrow">→</span></div></a></div>
-  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('users_page') }}"><div class="card-body"><span class="dashboard-icon">U</span><div><h3>User accounts</h3><p>Application access and roles</p></div><span class="dashboard-arrow">→</span></div></a></div>
+  {% if current_user.role == Role.ADMIN.value %}
+  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('reports.reports_page') }}"><div class="card-body"><span class="dashboard-icon">R</span><div><h3>Reports</h3><p>Expenses, donations, Gift Aid, and volunteer mileage</p></div><span class="dashboard-arrow">â†’</span></div></a></div>
+  <div class="col-md-6 col-xl-4"><a class="card dashboard-link" href="{{ url_for('admin.users_page') }}"><div class="card-body"><span class="dashboard-icon">U</span><div><h3>User accounts</h3><p>Application access and roles</p></div><span class="dashboard-arrow">â†’</span></div></a></div>
   {% endif %}
 </section>
 {% endblock %}
@@ -60,3 +60,4 @@
 <p>The dashboard summarizes club activity and provides shortcuts to the sections available to your account.</p>
 <ul class="mb-0"><li>Admins and treasurers can see club-wide totals.</li><li>Volunteers can submit a trip and review only their own trip records.</li><li>Use the navigation bar or workspace cards to open a section.</li></ul>
 {% endblock %}
+

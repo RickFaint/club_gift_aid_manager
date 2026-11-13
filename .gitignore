@@ -3,3 +3,14 @@ __pycache__/
 .pytest_cache/
 .coverage
 *.py[cod]
+.env
+.env.*
+*.key
+*.keys
+backups/
+sbom.cdx.json
+.pip-tools-cache/
+*.sqlite3.backup
+*.sqlite3.backup-*
+audit-exports/
+*.audit-export.json

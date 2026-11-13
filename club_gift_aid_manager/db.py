@@ -9,6 +9,9 @@ own declaration/payment/trips) are checked here as well as in the HTTP layer.
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
+import logging
 import os
 import sqlite3
 from contextvars import ContextVar
@@ -18,6 +21,8 @@ from typing import Any, Iterable
 
 from werkzeug.security import generate_password_hash
 
+from .crypto import blind_index, decrypt_value, encrypt_value, validate_encryption_config
+from .roles import Role
 from .services import (
     BASE_RATE_BANDS,
     calculate_tax_year,
@@ -30,6 +35,32 @@ DB_PATH = Path(os.environ.get(
     "CLUB_GIFT_AID_DB",
     str(Path(__file__).resolve().parent.parent / "club_gift_aid_manager.sqlite3"),
 ))
+INITIAL_PRIVACY_NOTICE_PATH = Path(__file__).resolve().parent.parent / "privacy-notice.txt"
+
+_WINDOWS_PERMISSION_WARNING_EMITTED = False
+
+ENCRYPTED_FIELDS: dict[str, tuple[str, ...]] = {
+    "people": ("name", "email", "phone", "notes"),
+    "users": ("username",),
+    "gift_aid_declarations": ("full_name", "home_address", "postcode", "scope", "evidence_ref"),
+    "destinations": ("name", "address", "town_city", "postcode", "notes", "latitude", "longitude"),
+    "trips": ("vehicle_type", "miles_one_way", "total_miles", "passengers", "declaration_text"),
+    "donations": ("amount_pence", "method", "reference", "bank_reference", "receipt_id"),
+    "payments": ("batch_id", "amount_pence", "method", "reference"),
+    "audit_events": ("actor_username",),
+}
+
+FIELD_CASTS = {
+    ("destinations", "latitude"): float,
+    ("destinations", "longitude"): float,
+    ("trips", "miles_one_way"): float,
+    ("trips", "total_miles"): float,
+    ("trips", "passengers"): int,
+    ("donations", "amount_pence"): int,
+    ("donations", "receipt_id"): int,
+    ("payments", "batch_id"): int,
+    ("payments", "amount_pence"): int,
+}
 
 _REQUEST_CONNECTION: ContextVar[sqlite3.Connection | None] = ContextVar(
     "club_gift_aid_request_connection",
@@ -60,13 +91,21 @@ def get_connection() -> sqlite3.Connection:
     if request_connection is not None:
         return request_connection
 
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    global _WINDOWS_PERMISSION_WARNING_EMITTED
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name == "posix":
+        os.chmod(DB_PATH.parent, 0o700)
         descriptor = os.open(DB_PATH, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
+    elif not _WINDOWS_PERMISSION_WARNING_EMITTED:
+        logging.getLogger(__name__).warning(
+            "Windows development mode cannot enforce POSIX database permissions; "
+            "do not use this configuration for production data."
+        )
+        _WINDOWS_PERMISSION_WARNING_EMITTED = True
     conn = sqlite3.connect(DB_PATH, factory=_RequestConnection)
     conn.row_factory = sqlite3.Row
     return conn
@@ -112,12 +151,42 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+def _encrypt_fields(table: str, values: dict[str, Any]) -> dict[str, Any]:
+    """Copy values and encrypt the sensitive fields belonging to a table."""
+    result = dict(values)
+    for field in ENCRYPTED_FIELDS[table]:
+        if field in result:
+            result[field] = encrypt_value(result[field])
+    return result
+
+
+def _decrypt_fields(table: str, row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    """Convert and decrypt one database record, preserving public return types."""
+    if row is None:
+        return None
+    result = dict(row)
+    for field in ENCRYPTED_FIELDS[table]:
+        if field in result:
+            value = decrypt_value(result[field])
+            caster = FIELD_CASTS.get((table, field))
+            result[field] = caster(value) if value is not None and caster else value
+    return result
+
+
+def _decrypt_alias(row: dict[str, Any], field: str, caster=None) -> None:
+    if field not in row:
+        return
+    value = decrypt_value(row[field])
+    row[field] = caster(value) if value is not None and caster else value
+
+
 def create_app_database() -> None:
     """Create missing tables and migrate columns for databases from older app versions.
 
     The schema is kept in one idempotent script. The following column checks
     add newer fields only when absent, preserving existing stored records.
     """
+    validate_encryption_config()
     conn = get_connection()
     try:
         conn.executescript(
@@ -136,13 +205,24 @@ def create_app_database() -> None:
             -- Login identities are separate from people and may optionally link to one.
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                username TEXT NOT NULL,
+                username_bidx TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL CHECK(role IN ('admin', 'treasurer', 'volunteer')),
                 person_id INTEGER,
                 is_active INTEGER NOT NULL DEFAULT 1,
+                session_version INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(person_id) REFERENCES people(id)
+            );
+
+            -- Published privacy notices are append-only evidence of what users were shown.
+            CREATE TABLE IF NOT EXISTS privacy_notice_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                effective_date TEXT NOT NULL,
+                published_date TEXT NOT NULL,
+                text_sha256 TEXT NOT NULL,
+                notice_text TEXT NOT NULL
             );
 
             -- Donor declaration evidence; donations link to the declaration record.
@@ -156,21 +236,25 @@ def create_app_database() -> None:
                 scope TEXT,
                 withdrawn_date TEXT,
                 evidence_ref TEXT,
-                FOREIGN KEY(person_id) REFERENCES people(id)
+                privacy_notice_version_id INTEGER NOT NULL,
+                privacy_notice_sha256 TEXT NOT NULL,
+                FOREIGN KEY(person_id) REFERENCES people(id),
+                FOREIGN KEY(privacy_notice_version_id) REFERENCES privacy_notice_versions(id)
             );
 
             -- Geocodable grounds used as trip origins and destinations.
             CREATE TABLE IF NOT EXISTS destinations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                name TEXT NOT NULL,
+                name_bidx TEXT NOT NULL UNIQUE,
                 address TEXT,
                 town_city TEXT,
                 postcode TEXT,
                 notes TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
                 home_ground INTEGER NOT NULL DEFAULT 0,
-                latitude REAL,
-                longitude REAL
+                latitude TEXT,
+                longitude TEXT
             );
 
             -- Complete mileage rate schedules. Period end dates are derived from
@@ -194,10 +278,10 @@ def create_app_database() -> None:
                 vehicle_type TEXT NOT NULL,
                 trip_date TEXT NOT NULL,
                 tax_year TEXT NOT NULL,
-                miles_one_way REAL NOT NULL,
+                miles_one_way TEXT NOT NULL,
                 return_trip INTEGER NOT NULL,
-                total_miles REAL NOT NULL,
-                passengers INTEGER NOT NULL,
+                total_miles TEXT NOT NULL,
+                passengers TEXT NOT NULL,
                 declaration_accepted INTEGER NOT NULL,
                 declaration_text TEXT NOT NULL,
                 declared_at TEXT,
@@ -212,7 +296,7 @@ def create_app_database() -> None:
             CREATE TABLE IF NOT EXISTS donations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 person_id INTEGER NOT NULL,
-                amount_pence INTEGER NOT NULL,
+                amount_pence TEXT NOT NULL,
                 donated_date TEXT,
                 method TEXT,
                 reference TEXT,
@@ -222,7 +306,7 @@ def create_app_database() -> None:
                 linked_payment_id INTEGER,
                 received_date TEXT,
                 bank_reference TEXT,
-                receipt_id INTEGER,
+                receipt_id TEXT,
                 FOREIGN KEY(person_id) REFERENCES people(id),
                 FOREIGN KEY(declaration_id) REFERENCES gift_aid_declarations(id)
             );
@@ -231,8 +315,8 @@ def create_app_database() -> None:
             CREATE TABLE IF NOT EXISTS payments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 person_id INTEGER NOT NULL,
-                batch_id INTEGER,
-                amount_pence INTEGER NOT NULL,
+                batch_id TEXT,
+                amount_pence TEXT NOT NULL,
                 paid_date TEXT,
                 method TEXT,
                 reference TEXT,
@@ -269,6 +353,20 @@ def create_app_database() -> None:
                 occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- Audit history is append-only.  Even application defects cannot
+            -- silently rewrite or remove an event once it has been recorded.
+            CREATE TRIGGER IF NOT EXISTS audit_events_no_update
+            BEFORE UPDATE ON audit_events
+            BEGIN
+                SELECT RAISE(ABORT, 'audit events are immutable');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS audit_events_no_delete
+            BEFORE DELETE ON audit_events
+            BEGIN
+                SELECT RAISE(ABORT, 'audit events are immutable');
+            END;
+
             -- Short-lived, pseudonymous counters throttle repeated login guesses.
             CREATE TABLE IF NOT EXISTS login_attempts (
                 attempt_key TEXT PRIMARY KEY,
@@ -276,8 +374,39 @@ def create_app_database() -> None:
                 window_started_at INTEGER NOT NULL,
                 locked_until INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TRIGGER IF NOT EXISTS privacy_notice_versions_no_update
+            BEFORE UPDATE ON privacy_notice_versions
+            BEGIN
+                SELECT RAISE(ABORT, 'Published privacy notice versions are immutable.');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS privacy_notice_versions_no_delete
+            BEFORE DELETE ON privacy_notice_versions
+            BEGIN
+                SELECT RAISE(ABORT, 'Published privacy notice versions are immutable.');
+            END;
             """
         )
+        if conn.execute("SELECT 1 FROM privacy_notice_versions LIMIT 1").fetchone() is None:
+            try:
+                initial_notice = INITIAL_PRIVACY_NOTICE_PATH.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                initial_notice = (
+                    "The club privacy statement has not been configured. "
+                    "Please contact the club administrator."
+                )
+            conn.execute(
+                """INSERT INTO privacy_notice_versions
+                       (effective_date, published_date, text_sha256, notice_text)
+                   VALUES (?, ?, ?, ?)""",
+                (
+                    date.today().isoformat(),
+                    date.today().isoformat(),
+                    hashlib.sha256(initial_notice.encode("utf-8")).hexdigest(),
+                    initial_notice,
+                ),
+            )
         # Preserve the app's former rates for all dates before the first admin change.
         conn.execute(
             """INSERT OR IGNORE INTO mileage_rate_schedules (
@@ -300,6 +429,15 @@ def create_app_database() -> None:
         destination_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(destinations)").fetchall()
         }
+        user_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()
+        }
+        # Existing accounts begin at version one.  Changing this value later
+        # makes sessions issued with an older version immediately invalid.
+        if "session_version" not in user_columns:
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1"
+            )
         # New location flags default off so no legacy location is assumed to be home.
         if "home_ground" not in destination_columns:
             conn.execute(
@@ -324,6 +462,25 @@ def create_app_database() -> None:
         if "active" not in declaration_columns:
             conn.execute(
                 "ALTER TABLE gift_aid_declarations ADD COLUMN active INTEGER NOT NULL DEFAULT 1"
+            )
+        current_notice = conn.execute(
+            "SELECT id, text_sha256 FROM privacy_notice_versions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if "privacy_notice_version_id" not in declaration_columns:
+            conn.execute(
+                "ALTER TABLE gift_aid_declarations ADD COLUMN privacy_notice_version_id INTEGER"
+            )
+            conn.execute(
+                "UPDATE gift_aid_declarations SET privacy_notice_version_id = ?",
+                (current_notice["id"],),
+            )
+        if "privacy_notice_sha256" not in declaration_columns:
+            conn.execute(
+                "ALTER TABLE gift_aid_declarations ADD COLUMN privacy_notice_sha256 TEXT"
+            )
+            conn.execute(
+                "UPDATE gift_aid_declarations SET privacy_notice_sha256 = ?",
+                (current_notice["text_sha256"],),
             )
         # Preserve existing single-payment links in the new many-to-many relation.
         conn.execute(
@@ -364,7 +521,7 @@ def record_audit_event(
                ) VALUES (?, ?, ?, ?, ?, ?)""",
             (
                 actor_user_id,
-                actor_username,
+                encrypt_value(actor_username),
                 action,
                 entity_type,
                 str(entity_id),
@@ -476,22 +633,25 @@ def clear_login_failures(attempt_keys: Iterable[str]) -> None:
         conn.close()
 
 
-def list_audit_events(limit: int = 500) -> list[dict[str, Any]]:
+def list_audit_events(
+    limit: int = 500, offset: int = 0, *, with_total: bool = False
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """Return newest audit events, bounded to prevent an unbounded page response."""
     conn = get_connection()
     try:
+        total = conn.execute("SELECT COUNT(*) AS count FROM audit_events").fetchone()["count"]
         rows = conn.execute(
             """SELECT id, actor_user_id, actor_username, action, entity_type,
                       entity_id, changed_fields, occurred_at
                FROM audit_events
                ORDER BY id DESC
-               LIMIT ?""",
-            (max(1, min(int(limit), 1000)),),
+               LIMIT ? OFFSET ?""",
+            (max(1, min(int(limit), 1000)), max(0, int(offset))),
         ).fetchall()
-        events = [dict(row) for row in rows]
+        events = [_decrypt_fields("audit_events", row) for row in rows]
         for event in events:
             event["changed_fields"] = json.loads(event["changed_fields"])
-        return events
+        return (events, total) if with_total else events
     finally:
         conn.close()
 
@@ -500,13 +660,13 @@ def create_user(*, username: str, password: str, role: str, person_id: int | Non
     """Validate a login identity, hash its password, and persist the account."""
     if not username.strip():
         raise ValueError("Username is required.")
-    if role not in {"admin", "treasurer", "volunteer"}:
+    if role not in {member.value for member in Role}:
         raise ValueError("Role must be admin, treasurer, or volunteer.")
     if not 12 <= len(password) <= 1024:
         raise ValueError("Password must be between 12 and 1024 characters.")
-    if role == "volunteer" and person_id is None:
+    if role == Role.VOLUNTEER.value and person_id is None:
         raise ValueError("Volunteer accounts must be linked to a person.")
-    if role == "admin" and person_id is not None:
+    if role == Role.ADMIN.value and person_id is not None:
         raise ValueError("Administrator accounts cannot be linked to a person.")
     conn = get_connection()
     try:
@@ -515,16 +675,23 @@ def create_user(*, username: str, password: str, role: str, person_id: int | Non
         ).fetchone() is None:
             raise ValueError("Linked person was not found.")
         cursor = conn.execute(
-            """INSERT INTO users (username, password_hash, role, person_id)
-               VALUES (?, ?, ?, ?)""",
-            (username.strip(), generate_password_hash(password), role, person_id),
+            """INSERT INTO users (username, username_bidx, password_hash, role, person_id)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                encrypt_value(username.strip()),
+                blind_index(username),
+                generate_password_hash(password),
+                role,
+                person_id,
+            ),
         )
         conn.commit()
         row = conn.execute(
-            "SELECT id, username, role, person_id, is_active, created_at FROM users WHERE id = ?",
+            """SELECT id, username, role, person_id, is_active, session_version,
+                      created_at FROM users WHERE id = ?""",
             (cursor.lastrowid,),
         ).fetchone()
-        return dict(row)
+        return _decrypt_fields("users", row)
     finally:
         conn.close()
 
@@ -533,8 +700,10 @@ def get_user_by_username(username: str) -> dict[str, Any] | None:
     """Find an account case-insensitively; includes its hash for login checking."""
     conn = get_connection()
     try:
-        row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-        return _row_to_dict(row)
+        row = conn.execute(
+            "SELECT * FROM users WHERE username_bidx = ?", (blind_index(username),)
+        ).fetchone()
+        return _decrypt_fields("users", row)
     finally:
         conn.close()
 
@@ -544,23 +713,33 @@ def get_user_by_id(user_id: int) -> dict[str, Any] | None:
     conn = get_connection()
     try:
         row = conn.execute(
-            "SELECT id, username, role, person_id, is_active, created_at FROM users WHERE id = ?",
+            """SELECT id, username, role, person_id, is_active, session_version,
+                      created_at FROM users WHERE id = ?""",
             (user_id,),
         ).fetchone()
-        return _row_to_dict(row)
+        return _decrypt_fields("users", row)
     finally:
         conn.close()
 
 
-def list_users() -> list[dict[str, Any]]:
+def list_users(
+    *, limit: int | None = None, offset: int = 0, with_total: bool = False
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List account metadata for the admin account-management view."""
     conn = get_connection()
     try:
+        total = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         rows = conn.execute(
-            """SELECT id, username, role, person_id, is_active, created_at
-               FROM users ORDER BY username"""
+            """SELECT id, username, role, person_id, is_active, session_version, created_at
+               FROM users"""
         ).fetchall()
-        return [dict(row) for row in rows]
+        users = sorted(
+            (_decrypt_fields("users", row) for row in rows),
+            key=lambda user: user["username"].casefold(),
+        )
+        if limit is not None:
+            users = users[offset : offset + limit]
+        return (users, total) if with_total else users
     finally:
         conn.close()
 
@@ -578,17 +757,21 @@ def update_user(
         return None
     next_role = role or user["role"]
     next_person_id = person_id if person_id is not None else user["person_id"]
-    if next_role == "admin":
+    if next_role == Role.ADMIN.value:
         next_person_id = None
-    if next_role not in {"admin", "treasurer", "volunteer"}:
+    if next_role not in {member.value for member in Role}:
         raise ValueError("Role must be admin, treasurer, or volunteer.")
-    if next_role == "volunteer" and next_person_id is None:
+    if next_role == Role.VOLUNTEER.value and next_person_id is None:
         raise ValueError("Cannot assign volunteer role without a linked person.")
     assignments = ["role = ?", "person_id = ?"]
     values: list[Any] = [next_role, next_person_id]
     if is_active is not None:
         assignments.append("is_active = ?")
         values.append(int(is_active))
+    # A role change or explicit deactivation revokes every session created
+    # with the previous version.  Other profile edits leave sessions valid.
+    if next_role != user["role"] or is_active is False:
+        assignments.append("session_version = session_version + 1")
     values.append(user_id)
     conn = get_connection()
     try:
@@ -596,10 +779,13 @@ def update_user(
             "SELECT 1 FROM people WHERE id = ?", (next_person_id,)
         ).fetchone() is None:
             raise ValueError("Linked person was not found.")
-        if user["role"] == "admin" and (next_role != "admin" or is_active is False):
+        if user["role"] == Role.ADMIN.value and (
+            next_role != Role.ADMIN.value or is_active is False
+        ):
             # Never allow an operation to remove the final active administrator.
             active_admins = conn.execute(
-                "SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND is_active = 1"
+                "SELECT COUNT(*) AS count FROM users WHERE role = ? AND is_active = 1",
+                (Role.ADMIN.value,),
             ).fetchone()["count"]
             if active_admins <= 1:
                 raise ValueError("Cannot demote or deactivate the last active administrator.")
@@ -610,27 +796,36 @@ def update_user(
     return get_user_by_id(user_id)
 
 
-def create_person(*, name: str, email: str | None = None, phone: str | None = None, role: str = "volunteer", active: bool = True, notes: str | None = None) -> dict[str, Any]:
+def create_person(*, name: str, email: str | None = None, phone: str | None = None, role: str = Role.VOLUNTEER.value, active: bool = True, notes: str | None = None) -> dict[str, Any]:
     """Insert a contact and return the persisted record."""
     conn = get_connection()
     try:
+        values = _encrypt_fields("people", {
+            "name": name, "email": email, "phone": phone, "notes": notes,
+        })
         cursor = conn.execute(
             "INSERT INTO people (name, email, phone, role, active, notes) VALUES (?, ?, ?, ?, ?, ?)",
-            (name, email, phone, role, int(active), notes),
+            (values["name"], values["email"], values["phone"], role, int(active), values["notes"]),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM people WHERE id = ?", (cursor.lastrowid,)).fetchone()
-        return _row_to_dict(row)
+        return _decrypt_fields("people", row)
     finally:
         conn.close()
 
 
-def list_people() -> list[dict[str, Any]]:
+def list_people(
+    *, limit: int | None = None, offset: int = 0, with_total: bool = False
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """Return all contacts for staff and the selector controls."""
     conn = get_connection()
     try:
-        rows = conn.execute("SELECT * FROM people ORDER BY id ASC").fetchall()
-        return [dict(row) for row in rows]
+        total = conn.execute("SELECT COUNT(*) AS count FROM people").fetchone()["count"]
+        suffix = " LIMIT ? OFFSET ?" if limit is not None else ""
+        params = (limit, offset) if limit is not None else ()
+        rows = conn.execute("SELECT * FROM people ORDER BY id ASC" + suffix, params).fetchall()
+        people = [_decrypt_fields("people", row) for row in rows]
+        return (people, total) if with_total else people
     finally:
         conn.close()
 
@@ -640,7 +835,7 @@ def get_person(person_id: int) -> dict[str, Any] | None:
     conn = get_connection()
     try:
         row = conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
-        return _row_to_dict(row)
+        return _decrypt_fields("people", row)
     finally:
         conn.close()
 
@@ -656,13 +851,14 @@ def update_person(person_id: int, **updates: Any) -> dict[str, Any] | None:
         return get_person(person_id)
 
     assignments = ", ".join(f"{key} = ?" for key in updates_to_apply)
-    values = [updates_to_apply[key] for key in updates_to_apply]
+    encrypted_updates = _encrypt_fields("people", updates_to_apply)
+    values = [encrypted_updates[key] for key in updates_to_apply]
     conn = get_connection()
     try:
         conn.execute(f"UPDATE people SET {assignments} WHERE id = ?", (*values, person_id))
         conn.commit()
         row = conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
-        return _row_to_dict(row)
+        return _decrypt_fields("people", row)
     finally:
         conn.close()
 
@@ -681,13 +877,13 @@ def anonymize_person(person_id: int) -> bool:
                SET name = ?, email = NULL, phone = NULL, notes = NULL,
                    active = 0, role = 'other'
                WHERE id = ?""",
-            (f"Deleted person {person_id}", person_id),
+            (encrypt_value(f"Deleted person {person_id}"), person_id),
         )
         conn.execute(
             """UPDATE gift_aid_declarations
                SET full_name = ?, home_address = NULL, postcode = NULL, evidence_ref = NULL
                WHERE person_id = ?""",
-            (f"Deleted person {person_id}", person_id),
+            (encrypt_value(f"Deleted person {person_id}"), person_id),
         )
         conn.execute(
             "UPDATE users SET is_active = 0, person_id = NULL WHERE person_id = ?",
@@ -699,22 +895,99 @@ def anonymize_person(person_id: int) -> bool:
         conn.close()
 
 
-def create_declaration(*, person_id: int, full_name: str, home_address: str | None = None, postcode: str | None = None, declaration_date: str | None = None, scope: str = "future", withdrawn_date: str | None = None, evidence_ref: str | None = None) -> dict[str, Any]:
+def _privacy_notice_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """Return a notice version only when its stored digest still matches its text."""
+    if row is None:
+        return None
+    notice = dict(row)
+    actual_hash = hashlib.sha256(notice["notice_text"].encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(actual_hash, notice["text_sha256"]):
+        raise RuntimeError("Stored privacy notice text does not match its recorded SHA-256.")
+    return notice
+
+
+def get_current_privacy_notice() -> dict[str, Any]:
+    """Return the most recently published immutable privacy notice version."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM privacy_notice_versions ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        notice = _privacy_notice_to_dict(row)
+        if notice is None:
+            raise RuntimeError("No privacy notice version has been published.")
+        return notice
+    finally:
+        conn.close()
+
+
+def get_privacy_notice_version(version_id: int) -> dict[str, Any] | None:
+    """Return one historical notice version by its stable identifier."""
+    conn = get_connection()
+    try:
+        return _privacy_notice_to_dict(conn.execute(
+            "SELECT * FROM privacy_notice_versions WHERE id = ?", (version_id,)
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def publish_privacy_notice(notice_text: str, *, effective_date: str | None = None) -> dict[str, Any]:
+    """Append a new notice version; database triggers prohibit later edits or deletion."""
+    effective = date.fromisoformat(effective_date) if effective_date else date.today()
+    digest = hashlib.sha256(notice_text.encode("utf-8")).hexdigest()
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """INSERT INTO privacy_notice_versions
+                   (effective_date, published_date, text_sha256, notice_text)
+               VALUES (?, ?, ?, ?)""",
+            (effective.isoformat(), date.today().isoformat(), digest, notice_text),
+        )
+        conn.commit()
+        return _privacy_notice_to_dict(conn.execute(
+            "SELECT * FROM privacy_notice_versions WHERE id = ?", (cursor.lastrowid,)
+        ).fetchone())
+    finally:
+        conn.close()
+
+
+def create_declaration(*, person_id: int, full_name: str, home_address: str | None = None, postcode: str | None = None, declaration_date: str | None = None, scope: str = "future", withdrawn_date: str | None = None, evidence_ref: str | None = None, privacy_notice_version_id: int | None = None) -> dict[str, Any]:
     """Store Gift Aid declaration details for the selected donor."""
     conn = get_connection()
     try:
+        if privacy_notice_version_id is None:
+            notice_row = conn.execute(
+                "SELECT id, text_sha256 FROM privacy_notice_versions ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        else:
+            notice_row = conn.execute(
+                "SELECT id, text_sha256 FROM privacy_notice_versions WHERE id = ?",
+                (privacy_notice_version_id,),
+            ).fetchone()
+        if notice_row is None:
+            raise ValueError("A valid privacy notice version is required.")
+        values = _encrypt_fields("gift_aid_declarations", {
+            "full_name": full_name, "home_address": home_address, "postcode": postcode,
+            "scope": scope, "evidence_ref": evidence_ref,
+        })
         cursor = conn.execute(
             """
             INSERT INTO gift_aid_declarations (
                 person_id, full_name, home_address, postcode, declaration_date,
-                scope, withdrawn_date, evidence_ref
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                scope, withdrawn_date, evidence_ref, privacy_notice_version_id,
+                privacy_notice_sha256
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (person_id, full_name, home_address, postcode, declaration_date, scope, withdrawn_date, evidence_ref),
+            (
+                person_id, values["full_name"], values["home_address"], values["postcode"],
+                declaration_date, values["scope"], withdrawn_date, values["evidence_ref"],
+                notice_row["id"], notice_row["text_sha256"],
+            ),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM gift_aid_declarations WHERE id = ?", (cursor.lastrowid,)).fetchone()
-        return _row_to_dict(row)
+        return _decrypt_fields("gift_aid_declarations", row)
     finally:
         conn.close()
 
@@ -726,7 +999,7 @@ def get_declaration(declaration_id: int) -> dict[str, Any] | None:
         row = conn.execute(
             "SELECT * FROM gift_aid_declarations WHERE id = ?", (declaration_id,)
         ).fetchone()
-        return _row_to_dict(row)
+        return _decrypt_fields("gift_aid_declarations", row)
     finally:
         conn.close()
 
@@ -755,16 +1028,17 @@ def update_declaration(declaration_id: int, **fields: Any) -> dict[str, Any] | N
         ).fetchone():
             return None
         if updates:
+            encrypted_updates = _encrypt_fields("gift_aid_declarations", updates)
             assignments = ", ".join(f"{key} = ?" for key in updates)
             conn.execute(
                 f"UPDATE gift_aid_declarations SET {assignments} WHERE id = ?",
-                (*updates.values(), declaration_id),
+                (*(encrypted_updates[key] for key in updates), declaration_id),
             )
             conn.commit()
         row = conn.execute(
             "SELECT * FROM gift_aid_declarations WHERE id = ?", (declaration_id,)
         ).fetchone()
-        return _row_to_dict(row)
+        return _decrypt_fields("gift_aid_declarations", row)
     finally:
         conn.close()
 
@@ -783,15 +1057,26 @@ def deactivate_declaration(declaration_id: int) -> bool:
         conn.close()
 
 
-def list_declarations(person_id: int | None = None) -> list[dict[str, Any]]:
+def list_declarations(
+    person_id: int | None = None, *, limit: int | None = None, offset: int = 0,
+    with_total: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List declarations, optionally scoped to one person."""
     conn = get_connection()
     try:
-        if person_id is None:
-            rows = conn.execute("SELECT * FROM gift_aid_declarations ORDER BY id ASC").fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM gift_aid_declarations WHERE person_id = ? ORDER BY id ASC", (person_id,)).fetchall()
-        return [dict(r) for r in rows]
+        where = "" if person_id is None else " WHERE person_id = ?"
+        params: tuple[Any, ...] = () if person_id is None else (person_id,)
+        total = conn.execute(
+            "SELECT COUNT(*) AS count FROM gift_aid_declarations" + where, params
+        ).fetchone()["count"]
+        page = " LIMIT ? OFFSET ?" if limit is not None else ""
+        page_params = params + ((limit, offset) if limit is not None else ())
+        rows = conn.execute(
+            "SELECT * FROM gift_aid_declarations" + where + " ORDER BY id ASC" + page,
+            page_params,
+        ).fetchall()
+        declarations = [_decrypt_fields("gift_aid_declarations", row) for row in rows]
+        return (declarations, total) if with_total else declarations
     finally:
         conn.close()
 
@@ -813,13 +1098,19 @@ def create_destination(
     try:
         if home_ground:
             conn.execute("UPDATE destinations SET home_ground = 0 WHERE home_ground = 1")
+        values = _encrypt_fields("destinations", {
+            "name": cleaned_name, "address": address, "town_city": town_city,
+            "postcode": postcode, "notes": notes,
+        })
         cursor = conn.execute(
-            """INSERT INTO destinations (name, address, town_city, postcode, notes, home_ground)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (cleaned_name, address, town_city, postcode, notes, int(home_ground)),
+            """INSERT INTO destinations
+                   (name, name_bidx, address, town_city, postcode, notes, home_ground)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (values["name"], blind_index(cleaned_name), values["address"],
+             values["town_city"], values["postcode"], values["notes"], int(home_ground)),
         )
         conn.commit()
-        return dict(conn.execute(
+        return _decrypt_fields("destinations", conn.execute(
             "SELECT * FROM destinations WHERE id = ?", (cursor.lastrowid,)
         ).fetchone())
     finally:
@@ -839,12 +1130,12 @@ def create_destinations(locations: list[dict[str, Any]]) -> list[dict[str, Any]]
         for location in locations:
             name = location["name"]
             existing = conn.execute(
-                "SELECT name FROM destinations WHERE name = ? COLLATE NOCASE",
-                (name,),
+                "SELECT name FROM destinations WHERE name_bidx = ?",
+                (blind_index(name),),
             ).fetchone()
             name_key = name.translate(ascii_lower)
             if existing:
-                conflict_name = existing["name"]
+                conflict_name = decrypt_value(existing["name"])
             elif name_key in seen_names:
                 conflict_name = name
             else:
@@ -860,19 +1151,22 @@ def create_destinations(locations: list[dict[str, Any]]) -> list[dict[str, Any]]
             conn.execute("UPDATE destinations SET home_ground = 0 WHERE home_ground = 1")
         created = []
         for location in locations:
+            values = _encrypt_fields("destinations", location)
             cursor = conn.execute(
-                """INSERT INTO destinations (name, address, town_city, postcode, notes, home_ground)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO destinations
+                       (name, name_bidx, address, town_city, postcode, notes, home_ground)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    location["name"],
-                    location.get("address"),
-                    location.get("town_city"),
-                    location.get("postcode"),
-                    location.get("notes"),
+                    values["name"],
+                    blind_index(location["name"]),
+                    values.get("address"),
+                    values.get("town_city"),
+                    values.get("postcode"),
+                    values.get("notes"),
                     int(bool(location.get("home_ground"))),
                 ),
             )
-            created.append(dict(conn.execute(
+            created.append(_decrypt_fields("destinations", conn.execute(
                 "SELECT * FROM destinations WHERE id = ?", (cursor.lastrowid,)
             ).fetchone()))
         conn.commit()
@@ -881,15 +1175,23 @@ def create_destinations(locations: list[dict[str, Any]]) -> list[dict[str, Any]]
         conn.close()
 
 
-def list_destinations(*, active_only: bool = False) -> list[dict[str, Any]]:
+def list_destinations(
+    *, active_only: bool = False, limit: int | None = None, offset: int = 0,
+    with_total: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List locations; volunteers receive active locations only for trip choices."""
     conn = get_connection()
     try:
-        query = "SELECT * FROM destinations"
-        if active_only:
-            query += " WHERE active = 1"
-        rows = conn.execute(query + " ORDER BY name COLLATE NOCASE").fetchall()
-        return [dict(row) for row in rows]
+        where = " WHERE active = 1" if active_only else ""
+        total = conn.execute(
+            "SELECT COUNT(*) AS count FROM destinations" + where
+        ).fetchone()["count"]
+        rows = conn.execute("SELECT * FROM destinations" + where).fetchall()
+        destinations = [_decrypt_fields("destinations", row) for row in rows]
+        destinations.sort(key=lambda destination: destination["name"].casefold())
+        if limit is not None:
+            destinations = destinations[offset : offset + limit]
+        return (destinations, total) if with_total else destinations
     finally:
         conn.close()
 
@@ -898,7 +1200,7 @@ def get_destination(destination_id: int) -> dict[str, Any] | None:
     """Retrieve a location, including cached coordinates used by routing."""
     conn = get_connection()
     try:
-        return _row_to_dict(conn.execute(
+        return _decrypt_fields("destinations", conn.execute(
             "SELECT * FROM destinations WHERE id = ?", (destination_id,)
         ).fetchone())
     finally:
@@ -913,7 +1215,7 @@ def save_destination_coordinates(
     try:
         conn.execute(
             "UPDATE destinations SET latitude = ?, longitude = ? WHERE id = ?",
-            (latitude, longitude, destination_id),
+            (encrypt_value(latitude), encrypt_value(longitude), destination_id),
         )
         conn.commit()
     finally:
@@ -940,7 +1242,8 @@ def update_destination(destination_id: int, **updates: Any) -> dict[str, Any] | 
     if not updates_to_apply:
         return get_destination(destination_id)
     assignments = ", ".join(f"{key} = ?" for key in updates_to_apply)
-    values = [updates_to_apply[key] for key in updates_to_apply]
+    encrypted_updates = _encrypt_fields("destinations", updates_to_apply)
+    values = [encrypted_updates[key] for key in updates_to_apply]
     conn = get_connection()
     try:
         current = conn.execute(
@@ -953,6 +1256,9 @@ def update_destination(destination_id: int, **updates: Any) -> dict[str, Any] | 
         if updates_to_apply.get("home_ground"):
             # Clear the prior flag before setting this location's flag.
             conn.execute("UPDATE destinations SET home_ground = 0 WHERE home_ground = 1")
+        if "name" in updates_to_apply:
+            assignments += ", name_bidx = ?"
+            values.append(blind_index(updates_to_apply["name"]))
         conn.execute(
             f"UPDATE destinations SET {assignments} WHERE id = ?",
             (*values, destination_id),
@@ -964,7 +1270,7 @@ def update_destination(destination_id: int, **updates: Any) -> dict[str, Any] | 
                 (destination_id,),
             )
         conn.commit()
-        return _row_to_dict(conn.execute(
+        return _decrypt_fields("destinations", conn.execute(
             "SELECT * FROM destinations WHERE id = ?", (destination_id,)
         ).fetchone())
     finally:
@@ -1076,19 +1382,19 @@ def create_trips(
                     trip["person_id"],
                     trip["origin_id"],
                     trip["destination_id"],
-                    trip["vehicle_type"],
+                    encrypt_value(trip["vehicle_type"]),
                     trip["trip_date"].isoformat(),
                     trip["tax_year"],
-                    trip["miles_one_way"],
+                    encrypt_value(trip["miles_one_way"]),
                     int(trip["return_trip"]),
-                    trip["total_miles"],
-                    trip["passengers"],
+                    encrypt_value(trip["total_miles"]),
+                    encrypt_value(trip["passengers"]),
                     int(trip["declaration_accepted"]),
-                    declaration_text or "I declare that I have taken other parents' children on this journey.",
+                    encrypt_value(declaration_text or "I declare that I have taken other parents' children on this journey."),
                     trip["status"],
                 ),
             )
-            created.append(_row_to_dict(
+            created.append(_decrypt_fields("trips",
                 conn.execute("SELECT * FROM trips WHERE id = ?", (cursor.lastrowid,)).fetchone()
             ))
         conn.commit()
@@ -1097,7 +1403,10 @@ def create_trips(
         conn.close()
 
 
-def list_trips(person_id: int | None = None) -> list[dict[str, Any]]:
+def list_trips(
+    person_id: int | None = None, *, limit: int | None = None, offset: int = 0,
+    with_total: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List trip records with readable endpoints and any linked reimbursement ID."""
     conn = get_connection()
     try:
@@ -1108,13 +1417,25 @@ def list_trips(person_id: int | None = None) -> list[dict[str, Any]]:
                    LEFT JOIN destinations ON destinations.id = trips.destination_id
                    LEFT JOIN destinations AS origins ON origins.id = trips.origin_id
                    LEFT JOIN payment_trips ON payment_trips.trip_id = trips.id"""
-        if person_id is None:
-            rows = conn.execute(query + " ORDER BY trip_date DESC").fetchall()
-        else:
-            rows = conn.execute(
-                query + " WHERE trips.person_id = ? ORDER BY trip_date DESC", (person_id,)
-            ).fetchall()
-        return [dict(r) for r in rows]
+        where = "" if person_id is None else " WHERE trips.person_id = ?"
+        params: tuple[Any, ...] = () if person_id is None else (person_id,)
+        total = conn.execute(
+            "SELECT COUNT(*) AS count FROM trips" +
+            ("" if person_id is None else " WHERE person_id = ?"),
+            params,
+        ).fetchone()["count"]
+        page = " LIMIT ? OFFSET ?" if limit is not None else ""
+        rows = conn.execute(
+            query + where + " ORDER BY trip_date DESC" + page,
+            params + ((limit, offset) if limit is not None else ()),
+        ).fetchall()
+        trips = []
+        for row in rows:
+            trip = _decrypt_fields("trips", row)
+            _decrypt_alias(trip, "destination_name")
+            _decrypt_alias(trip, "origin_name")
+            trips.append(trip)
+        return (trips, total) if with_total else trips
     finally:
         conn.close()
 
@@ -1134,7 +1455,11 @@ def get_trip(trip_id: int) -> dict[str, Any] | None:
                WHERE trips.id = ?""",
             (trip_id,),
         ).fetchone()
-        return _row_to_dict(row)
+        trip = _decrypt_fields("trips", row)
+        if trip is not None:
+            _decrypt_alias(trip, "destination_name")
+            _decrypt_alias(trip, "origin_name")
+        return trip
     finally:
         conn.close()
 
@@ -1152,7 +1477,8 @@ def update_trip(trip_id: int, **updates: Any) -> dict[str, Any] | None:
         return get_trip(trip_id)
 
     assignments = ", ".join(f"{key} = ?" for key in updates_to_apply)
-    values = [updates_to_apply[key] for key in updates_to_apply]
+    encrypted_updates = _encrypt_fields("trips", updates_to_apply)
+    values = [encrypted_updates[key] for key in updates_to_apply]
     conn = get_connection()
     try:
         if "person_id" in updates_to_apply:
@@ -1175,7 +1501,7 @@ def update_trip(trip_id: int, **updates: Any) -> dict[str, Any] | None:
         conn.execute(f"UPDATE trips SET {assignments} WHERE id = ?", (*values, trip_id))
         conn.commit()
         row = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
-        return _row_to_dict(row)
+        return _decrypt_fields("trips", row)
     finally:
         conn.close()
 
@@ -1219,10 +1545,11 @@ def create_donation(*, person_id: int, amount_pence: int, donated_date: str | No
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                person_id, amount_pence, donated_date, method, reference,
+                person_id, encrypt_value(amount_pence), donated_date,
+                encrypt_value(method), encrypt_value(reference),
                 declaration_id, int(gift_aid_eligible), gift_aid_claimed_date,
                 payment_ids[0] if payment_ids else None,
-                received_date, bank_reference, receipt_id,
+                received_date, encrypt_value(bank_reference), encrypt_value(receipt_id),
             ),
         )
         donation_id = cursor.lastrowid
@@ -1281,7 +1608,7 @@ def _donation_with_payment_ids(
     donation_id: int,
 ) -> dict[str, Any] | None:
     """Return a donation with ordered payment IDs and legacy single-link alias."""
-    donation = _row_to_dict(conn.execute(
+    donation = _decrypt_fields("donations", conn.execute(
         "SELECT * FROM donations WHERE id = ?", (donation_id,)
     ).fetchone())
     if donation is None:
@@ -1373,7 +1700,8 @@ def update_donation(donation_id: int, **updates: Any) -> dict[str, Any] | None:
             updates_to_apply["linked_payment_id"] = payment_ids[0] if payment_ids else None
         if updates_to_apply:
             assignments = ", ".join(f"{key} = ?" for key in updates_to_apply)
-            values = [updates_to_apply[key] for key in updates_to_apply]
+            encrypted_updates = _encrypt_fields("donations", updates_to_apply)
+            values = [encrypted_updates[key] for key in updates_to_apply]
             conn.execute(
                 f"UPDATE donations SET {assignments} WHERE id = ?",
                 (*values, donation_id),
@@ -1404,7 +1732,10 @@ def set_donation_active(donation_id: int, active: bool) -> dict[str, Any] | None
     return update_donation(donation_id, active=active)
 
 
-def list_donations(person_id: int | None = None) -> list[dict[str, Any]]:
+def list_donations(
+    person_id: int | None = None, *, limit: int | None = None, offset: int = 0,
+    with_total: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List all donations and attach creator metadata when audit history exists."""
     conn = get_connection()
     try:
@@ -1422,16 +1753,24 @@ def list_donations(person_id: int | None = None) -> list[dict[str, Any]]:
                     AND audit_events.action = 'created'
               )
         """
-        if person_id is None:
-            rows = conn.execute(
-                query + " ORDER BY donations.donated_date DESC, donations.id DESC"
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                query + " WHERE donations.person_id = ? ORDER BY donations.donated_date DESC, donations.id DESC",
-                (person_id,),
-            ).fetchall()
-        donations = [dict(row) for row in rows]
+        where = "" if person_id is None else " WHERE donations.person_id = ?"
+        params: tuple[Any, ...] = () if person_id is None else (person_id,)
+        total = conn.execute(
+            "SELECT COUNT(*) AS count FROM donations" +
+            ("" if person_id is None else " WHERE person_id = ?"),
+            params,
+        ).fetchone()["count"]
+        page = " LIMIT ? OFFSET ?" if limit is not None else ""
+        rows = conn.execute(
+            query + where +
+            " ORDER BY donations.donated_date DESC, donations.id DESC" + page,
+            params + ((limit, offset) if limit is not None else ()),
+        ).fetchall()
+        donations = []
+        for row in rows:
+            donation = _decrypt_fields("donations", row)
+            _decrypt_alias(donation, "created_by")
+            donations.append(donation)
         for donation in donations:
             payment_ids = [
                 row["payment_id"] for row in conn.execute(
@@ -1441,7 +1780,7 @@ def list_donations(person_id: int | None = None) -> list[dict[str, Any]]:
             ]
             donation["linked_payment_ids"] = payment_ids
             donation["linked_payment_id"] = payment_ids[0] if payment_ids else None
-        return donations
+        return (donations, total) if with_total else donations
     finally:
         conn.close()
 
@@ -1489,6 +1828,7 @@ def create_payment(
             if allocated:
                 raise ValueError("A selected trip has already been linked to a payment.")
             # A linked payment represents full reimbursement, never partial allocation.
+            decrypted_trips = [_decrypt_fields("trips", trip) for trip in trips]
             expected_amount = sum(
                 calculate_trip_amounts(
                     vehicle_type=trip["vehicle_type"],
@@ -1500,7 +1840,7 @@ def create_payment(
                         _rate_schedule_for_date(conn, trip["trip_date"])
                     ),
                 )["total_amount_pence"]
-                for trip in trips
+                for trip in decrypted_trips
             )
             if amount_pence != expected_amount:
                 raise ValueError(
@@ -1509,7 +1849,8 @@ def create_payment(
                 )
         cursor = conn.execute(
             "INSERT INTO payments (person_id, batch_id, amount_pence, paid_date, method, reference) VALUES (?, ?, ?, ?, ?, ?)",
-            (person_id, batch_id, amount_pence, paid_date, method, reference),
+            (person_id, encrypt_value(batch_id), encrypt_value(amount_pence), paid_date,
+             encrypt_value(method), encrypt_value(reference)),
         )
         # The payment and all of its trip links share this open transaction.
         conn.executemany(
@@ -1518,40 +1859,49 @@ def create_payment(
         )
         conn.commit()
         row = conn.execute("SELECT * FROM payments WHERE id = ?", (cursor.lastrowid,)).fetchone()
-        payment = _row_to_dict(row)
+        payment = _decrypt_fields("payments", row)
         payment["trip_ids"] = selected_trip_ids
         return payment
     finally:
         conn.close()
 
 
-def list_payments(person_id: int | None = None) -> list[dict[str, Any]]:
+def list_payments(
+    person_id: int | None = None, *, limit: int | None = None, offset: int = 0,
+    with_total: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List payments with active linked-donation totals and linked-trip details."""
     conn = get_connection()
     try:
-        query = """
-            SELECT payments.*,
-                   COALESCE(SUM(donations.amount_pence), 0) AS related_donation_amount_pence,
-                   COUNT(DISTINCT donations.id) AS linked_donation_count
-            FROM payments
-            LEFT JOIN donation_payments ON donation_payments.payment_id = payments.id
-            LEFT JOIN donations
-              ON donations.id = donation_payments.donation_id AND donations.active = 1
-        """
-        if person_id is None:
-            rows = conn.execute(
-                query + " GROUP BY payments.id ORDER BY payments.paid_date DESC, payments.id DESC"
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                query + " WHERE payments.person_id = ? GROUP BY payments.id ORDER BY payments.paid_date DESC, payments.id DESC",
-                (person_id,),
-            ).fetchall()
-        payments = [dict(row) for row in rows]
+        query = "SELECT * FROM payments"
+        where = "" if person_id is None else " WHERE person_id = ?"
+        params: tuple[Any, ...] = () if person_id is None else (person_id,)
+        total = conn.execute(
+            "SELECT COUNT(*) AS count FROM payments" + where, params
+        ).fetchone()["count"]
+        page = " LIMIT ? OFFSET ?" if limit is not None else ""
+        rows = conn.execute(
+            query + where + " ORDER BY paid_date DESC, id DESC" + page,
+            params + ((limit, offset) if limit is not None else ()),
+        ).fetchall()
+        payments = [_decrypt_fields("payments", row) for row in rows]
         if not payments:
-            return payments
+            return (payments, total) if with_total else payments
         payment_ids = [payment["id"] for payment in payments]
         placeholders = ",".join("?" for _ in payment_ids)
+        linked_donations = conn.execute(
+            f"""SELECT donation_payments.payment_id, donations.id, donations.amount_pence
+                FROM donation_payments
+                JOIN donations ON donations.id = donation_payments.donation_id
+                WHERE donations.active = 1
+                  AND donation_payments.payment_id IN ({placeholders})""",
+            payment_ids,
+        ).fetchall()
+        donation_totals = {payment_id: 0 for payment_id in payment_ids}
+        donation_counts = {payment_id: 0 for payment_id in payment_ids}
+        for donation in linked_donations:
+            donation_totals[donation["payment_id"]] += int(decrypt_value(donation["amount_pence"]))
+            donation_counts[donation["payment_id"]] += 1
         # Batch-load the join rows to avoid one SQL query per payment row.
         linked_trips = conn.execute(
             f"""SELECT payment_trips.payment_id, trips.id AS trip_id, trips.trip_date,
@@ -1571,14 +1921,16 @@ def list_payments(person_id: int | None = None) -> list[dict[str, Any]]:
             trips_by_payment[trip["payment_id"]].append({
                 "id": trip["trip_id"],
                 "trip_date": trip["trip_date"],
-                "total_miles": trip["total_miles"],
-                "destination_name": trip["destination_name"],
+                "total_miles": float(decrypt_value(trip["total_miles"])),
+                "destination_name": decrypt_value(trip["destination_name"]),
             })
         for payment in payments:
+            payment["related_donation_amount_pence"] = donation_totals[payment["id"]]
+            payment["linked_donation_count"] = donation_counts[payment["id"]]
             payment["linked_trips"] = trips_by_payment[payment["id"]]
             payment["trip_ids"] = [trip["id"] for trip in payment["linked_trips"]]
             payment["donated_back_pence"] = payment["related_donation_amount_pence"]
-        return payments
+        return (payments, total) if with_total else payments
     finally:
         conn.close()
 
@@ -1587,42 +1939,42 @@ def list_payment_reconciliation() -> list[dict[str, Any]]:
     """Aggregate payments and donations linked to payments by person."""
     conn = get_connection()
     try:
+        people = {
+            row["id"]: decrypt_value(row["name"])
+            for row in conn.execute("SELECT id, name FROM people").fetchall()
+        }
+        payment_totals: dict[int, dict[str, int]] = {}
+        for row in conn.execute("SELECT person_id, amount_pence FROM payments").fetchall():
+            totals = payment_totals.setdefault(row["person_id"], {"total": 0, "count": 0})
+            totals["total"] += int(decrypt_value(row["amount_pence"]))
+            totals["count"] += 1
+        donation_totals: dict[int, dict[str, int]] = {}
         rows = conn.execute(
-            """
-            SELECT people.id AS person_id,
-                   people.name AS person_name,
-                   payments.payment_total_pence,
-                   payments.payment_count,
-                   COALESCE(donations.donation_total_pence, 0) AS linked_donation_total_pence,
-                   COALESCE(donations.donation_count, 0) AS linked_donation_count,
-                   payments.payment_total_pence
-                     - COALESCE(donations.donation_total_pence, 0) AS difference_pence
-            FROM (
-                SELECT person_id,
-                       SUM(amount_pence) AS payment_total_pence,
-                       COUNT(*) AS payment_count
-                FROM payments
-                GROUP BY person_id
-            ) AS payments
-            JOIN people ON people.id = payments.person_id
-            -- Each donation contributes once to person-level reconciliation,
-            -- even when it references multiple payments.
-            LEFT JOIN (
-                SELECT donations.person_id,
-                       SUM(donations.amount_pence) AS donation_total_pence,
-                       COUNT(*) AS donation_count
-                FROM donations
-                WHERE donations.active = 1
-                  AND EXISTS (
-                      SELECT 1 FROM donation_payments
-                      WHERE donation_payments.donation_id = donations.id
-                  )
-                GROUP BY donations.person_id
-            ) AS donations ON donations.person_id = payments.person_id
-            ORDER BY people.name COLLATE NOCASE
-            """
+            """SELECT donations.person_id, donations.amount_pence
+               FROM donations
+               WHERE donations.active = 1
+                 AND EXISTS (
+                     SELECT 1 FROM donation_payments
+                     WHERE donation_payments.donation_id = donations.id
+                 )"""
         ).fetchall()
-        return [dict(row) for row in rows]
+        for row in rows:
+            totals = donation_totals.setdefault(row["person_id"], {"total": 0, "count": 0})
+            totals["total"] += int(decrypt_value(row["amount_pence"]))
+            totals["count"] += 1
+        result = []
+        for person_id, payment in payment_totals.items():
+            donation = donation_totals.get(person_id, {"total": 0, "count": 0})
+            result.append({
+                "person_id": person_id,
+                "person_name": people[person_id],
+                "payment_total_pence": payment["total"],
+                "payment_count": payment["count"],
+                "linked_donation_total_pence": donation["total"],
+                "linked_donation_count": donation["count"],
+                "difference_pence": payment["total"] - donation["total"],
+            })
+        return sorted(result, key=lambda row: row["person_name"].casefold())
     finally:
         conn.close()
 
@@ -1633,8 +1985,14 @@ def get_summary() -> dict[str, Any]:
     try:
         people_count = conn.execute("SELECT COUNT(*) AS count FROM people").fetchone()["count"]
         trips_count = conn.execute("SELECT COUNT(*) AS count FROM trips").fetchone()["count"]
-        total_donations = conn.execute("SELECT COALESCE(SUM(amount_pence), 0) AS total FROM donations WHERE active = 1").fetchone()["total"]
-        total_payments = conn.execute("SELECT COALESCE(SUM(amount_pence), 0) AS total FROM payments").fetchone()["total"]
+        total_donations = sum(
+            int(decrypt_value(row["amount_pence"]))
+            for row in conn.execute("SELECT amount_pence FROM donations WHERE active = 1").fetchall()
+        )
+        total_payments = sum(
+            int(decrypt_value(row["amount_pence"]))
+            for row in conn.execute("SELECT amount_pence FROM payments").fetchall()
+        )
         return {
             "people": people_count,
             "trips": trips_count,
@@ -1810,9 +2168,14 @@ def get_person_dashboard(person_id: int | None) -> dict[str, Any]:
                LIMIT 3""",
             (person_id,),
         ).fetchall()
+        recent = []
+        for trip in recent_trips:
+            item = dict(trip)
+            _decrypt_alias(item, "destination_name")
+            recent.append(item)
         return {
             "trip_count": int(trip_count),
-            "recent_trips": [dict(trip) for trip in recent_trips],
+            "recent_trips": recent,
         }
     finally:
         conn.close()
@@ -1822,51 +2185,58 @@ def get_financial_report() -> dict[str, Any]:
     """Return club-wide totals and mileage/payment/donation aggregates by volunteer."""
     conn = get_connection()
     try:
-        totals = conn.execute(
-            """
-            SELECT
-                (SELECT COALESCE(SUM(amount_pence), 0) FROM payments) AS expenses_paid_pence,
-                (SELECT COALESCE(SUM(amount_pence), 0) FROM donations WHERE active = 1) AS donations_pence,
-                (SELECT COALESCE(SUM(amount_pence), 0) FROM donations
-                 WHERE active = 1 AND gift_aid_eligible = 1) AS eligible_donations_pence
-            """
-        ).fetchone()
-        volunteers = conn.execute(
-            """
-            SELECT people.id AS person_id,
-                   people.name AS person_name,
-                   COALESCE(trips.trip_count, 0) AS trip_count,
-                   COALESCE(trips.total_miles, 0) AS total_miles,
-                   COALESCE(payments.expenses_paid_pence, 0) AS expenses_paid_pence,
-                   COALESCE(donations.donations_pence, 0) AS donations_pence,
-                   COALESCE(payments.expenses_paid_pence, 0)
-                     - COALESCE(donations.donations_pence, 0) AS difference_pence
-            FROM people
-            LEFT JOIN (
-                SELECT person_id, COUNT(*) AS trip_count, SUM(total_miles) AS total_miles
-                FROM trips GROUP BY person_id
-            ) AS trips ON trips.person_id = people.id
-            LEFT JOIN (
-                SELECT person_id, SUM(amount_pence) AS expenses_paid_pence
-                FROM payments GROUP BY person_id
-            ) AS payments ON payments.person_id = people.id
-            LEFT JOIN (
-                SELECT person_id, SUM(amount_pence) AS donations_pence
-                FROM donations WHERE active = 1 GROUP BY person_id
-            ) AS donations ON donations.person_id = people.id
-            WHERE people.role = 'volunteer'
-            ORDER BY people.name COLLATE NOCASE, people.id
-            """
-        ).fetchall()
-        eligible_donations_pence = int(totals["eligible_donations_pence"])
+        people = [
+            {"person_id": row["id"], "person_name": decrypt_value(row["name"])}
+            for row in conn.execute(
+                "SELECT id, name FROM people WHERE role = ?",
+                (Role.VOLUNTEER.value,),
+            ).fetchall()
+        ]
+        trip_totals: dict[int, dict[str, float | int]] = {}
+        for row in conn.execute("SELECT person_id, total_miles FROM trips").fetchall():
+            totals = trip_totals.setdefault(row["person_id"], {"count": 0, "miles": 0.0})
+            totals["count"] += 1
+            totals["miles"] += float(decrypt_value(row["total_miles"]))
+        payment_totals: dict[int, int] = {}
+        expenses_paid_pence = 0
+        for row in conn.execute("SELECT person_id, amount_pence FROM payments").fetchall():
+            amount = int(decrypt_value(row["amount_pence"]))
+            expenses_paid_pence += amount
+            payment_totals[row["person_id"]] = payment_totals.get(row["person_id"], 0) + amount
+        donation_totals: dict[int, int] = {}
+        donations_pence = 0
+        eligible_donations_pence = 0
+        for row in conn.execute(
+            "SELECT person_id, amount_pence, gift_aid_eligible FROM donations WHERE active = 1"
+        ).fetchall():
+            amount = int(decrypt_value(row["amount_pence"]))
+            donations_pence += amount
+            if row["gift_aid_eligible"]:
+                eligible_donations_pence += amount
+            donation_totals[row["person_id"]] = donation_totals.get(row["person_id"], 0) + amount
+        volunteers = []
+        for person in people:
+            person_id = person["person_id"]
+            trips = trip_totals.get(person_id, {"count": 0, "miles": 0.0})
+            payments = payment_totals.get(person_id, 0)
+            donations = donation_totals.get(person_id, 0)
+            volunteers.append({
+                **person,
+                "trip_count": trips["count"],
+                "total_miles": trips["miles"],
+                "expenses_paid_pence": payments,
+                "donations_pence": donations,
+                "difference_pence": payments - donations,
+            })
+        volunteers.sort(key=lambda row: (row["person_name"].casefold(), row["person_id"]))
         return {
             "totals": {
-                "expenses_paid_pence": int(totals["expenses_paid_pence"]),
-                "donations_pence": int(totals["donations_pence"]),
+                "expenses_paid_pence": expenses_paid_pence,
+                "donations_pence": donations_pence,
                 "eligible_donations_pence": eligible_donations_pence,
                 "gift_aid_pence": (eligible_donations_pence * 25 + 50) // 100,
             },
-            "volunteers": [dict(row) for row in volunteers],
+            "volunteers": volunteers,
         }
     finally:
         conn.close()

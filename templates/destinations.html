@@ -1,12 +1,12 @@
-{% extends "base.html" %}
-{% block title %}Locations · Club Gift Aid Manager{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}Locations Â· Club Gift Aid Manager{% endblock %}
 {% block content %}
 {# Location masterfile stores opponent grounds and the club's default origin. #}
 <div class="page-heading">
   <div><h1>Locations</h1><p>Manage club grounds and opponent teams. Set one active location as the home ground.</p></div>
   <div class="d-flex flex-wrap gap-2">
     <button class="btn btn-outline-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#destination-import-modal">Upload CSV</button>
-    <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#destination-modal"><span class="me-1">＋</span> Add location</button>
+    <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#destination-modal"><span class="me-1">ï¼‹</span> Add location</button>
   </div>
 </div>
 <div class="modal fade" id="destination-import-modal" tabindex="-1" aria-labelledby="destination-import-title" aria-hidden="true">
@@ -18,7 +18,7 @@
           <label class="form-label" for="destination-csv-file">CSV file</label>
           <input id="destination-csv-file" class="form-control" type="file" name="file" accept=".csv,text/csv" required />
           <div class="form-text">Required column: <code>name</code>. Optional columns: <code>address</code>, <code>town_city</code>, <code>postcode</code>, <code>notes</code>, <code>home_ground</code> (yes/no). Later duplicate names in the CSV are skipped. No locations are imported if a row is invalid or a name already exists.</div>
-          <a class="small" href="{{ url_for('destinations_import_template') }}">Download CSV template</a>
+          <a class="small" href="{{ url_for('destinations.destinations_import_template') }}">Download CSV template</a>
         </div>
         <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Upload locations</button></div>
       </form>
@@ -28,9 +28,9 @@
 {# JavaScript fills this table and supplies edit/delete controls for staff. #}
 <div class="card">
   <div class="table-toolbar">
-    <div><h2 class="h6 mb-1">Location directory</h2><span class="table-count" id="destinations-count-label">Loading records…</span></div>
+    <div><h2 class="h6 mb-1">Location directory</h2><span class="table-count" id="destinations-count-label">Loading recordsâ€¦</span></div>
     <div class="table-search">
-      <div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search locations…" aria-label="Search locations" data-table-search="destinations-table-body" /></div>
+      <div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">âŒ•</span><input class="form-control" type="search" placeholder="Search locationsâ€¦" aria-label="Search locations" data-table-search="destinations-table-body" /></div>
     </div>
   </div>
   <div class="table-responsive">
@@ -90,3 +90,4 @@
 <p>Manage club grounds and opponent locations used when recording trips. Add locations individually or upload a CSV.</p>
 <ul class="mb-0"><li>Only active locations are available for new trips.</li><li>Set one active location as the home ground to make it the default trip origin.</li><li>Deactivate locations that are already used by trip records instead of deleting them.</li></ul>
 {% endblock %}
+

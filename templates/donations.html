@@ -1,17 +1,17 @@
-{% extends "base.html" %}
-{% block title %}Donations · Club Gift Aid Manager{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}Donations Â· Club Gift Aid Manager{% endblock %}
 {% block content %}
 {# Donations are separate voluntary gifts, not deductions from reimbursements. #}
 <div class="page-heading">
   <div><h1>Donations</h1><p>Voluntary donations are recorded independently from reimbursements.</p></div>
-  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#donation-modal"><span class="me-1">＋</span> Record donation</button>
+  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#donation-modal"><span class="me-1">ï¼‹</span> Record donation</button>
 </div>
 <div class="alert alert-info mb-4">Donations remain separate from reimbursements. Linking records is for reconciliation only; a donation is never deducted from or required for a reimbursement.</div>
 {# The table shows active and dormant gifts, creator metadata, and edit controls. #}
 <div class="card">
   <div class="table-toolbar">
     <div><h2 class="h6 mb-1">Donation records</h2><span class="table-count">Review voluntary contributions received.</span></div>
-    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">⌕</span><input class="form-control" type="search" placeholder="Search donations…" aria-label="Search donations" data-table-search="donations-table-body" /></div></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">âŒ•</span><input class="form-control" type="search" placeholder="Search donationsâ€¦" aria-label="Search donations" data-table-search="donations-table-body" /></div></div>
   </div>
   <div class="table-responsive"><table class="table table-hover align-middle">
     <thead><tr><th>Person</th><th>Amount</th><th>Donation date</th><th>Received</th><th>Method</th><th>Reimbursement links</th><th>Gift Aid eligible</th><th>Status</th><th>Added by</th><th>Added at</th><th></th></tr></thead>
@@ -67,3 +67,4 @@
 <p>Record voluntary donations separately from mileage reimbursements. Use the person, amount, and dates to identify the donation.</p>
 <ul class="mb-0"><li>Amounts are entered in pence.</li><li>Link a Gift Aid declaration only when appropriate and verify donor eligibility before marking a donation eligible.</li><li>A donation may be linked to multiple payments for reference. The full donation is not allocated to or offset against each payment.</li><li>Dormant donations are excluded from financial totals.</li></ul>
 {% endblock %}
+
