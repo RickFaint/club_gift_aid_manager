@@ -1,5 +1,7 @@
 const fieldHelpText = {
-  'privacy-notice-file': 'Choose a UTF-8 .txt file (up to 64 KB) to replace the privacy statement shown to all users. Only administrators can upload it.',
+  'privacy-notice-editor': 'Enter the privacy and GDPR information to show to all users. Only administrators can edit and save it. Plain text, up to 64 KB.',
+  notice: 'The privacy statement displayed to all users. Review it for accuracy and complete the club-specific details before saving.',
+  'privacy-notice-file': 'Optionally choose a UTF-8 .txt file (up to 64 KB) to replace the privacy statement shown to all users. Only administrators can upload it.',
   'trips-date-from': 'Show trips on or after this trip date. Clear the field to remove the start-date limit.',
   'trips-date-to': 'Show trips on or before this trip date. Clear the field to remove the end-date limit.',
   'donations-date-from': 'Show donations made on or after this donation date.',

@@ -1,21 +1,29 @@
-/** Submit the admin-only text upload and update the displayed notice as text. */
+/** Submit admin-entered or uploaded notice text and update the display as plain text. */
 document.addEventListener('DOMContentLoaded', () => {
-  const form = document.getElementById('privacy-notice-upload-form');
-  if (!form) return;
+  const editorForm = document.getElementById('privacy-notice-editor-form');
+  const uploadForm = document.getElementById('privacy-notice-upload-form');
+  const editor = document.getElementById('privacy-notice-editor');
+  const status = document.getElementById('privacy-notice-status');
 
-  form.addEventListener('submit', async (event) => {
+  const saveNotice = async (event, form, isUpload) => {
     event.preventDefault();
     const token = document.querySelector('meta[name="csrf-token"]')?.content;
     if (!token) {
-      window.alert('Could not verify this session. Refresh the page and try again.');
+      reportError('Could not verify this session. Refresh the page and try again.');
       return;
     }
 
     try {
+      const body = isUpload
+        ? new FormData(form)
+        : JSON.stringify({ notice: editor.value });
       const response = await fetch('/admin/privacy-notice', {
         method: 'POST',
-        headers: { 'X-CSRF-Token': token },
-        body: new FormData(form),
+        headers: {
+          'X-CSRF-Token': token,
+          ...(isUpload ? {} : { 'Content-Type': 'application/json' }),
+        },
+        body,
       });
       const data = (response.headers.get('content-type') || '').includes('application/json')
         ? await response.json()
@@ -25,10 +33,30 @@ document.addEventListener('DOMContentLoaded', () => {
       // Use textContent so a notice containing markup is never interpreted as HTML.
       const content = document.getElementById('privacy-notice-content');
       if (content) content.textContent = data.notice;
-      form.reset();
-      window.alert('Privacy statement updated for all pages.');
+      if (editor) editor.value = data.notice;
+      if (uploadForm) uploadForm.reset();
+      reportStatus('Privacy statement updated for all pages.', false);
     } catch (error) {
-      window.alert(error.message || 'Unable to update the privacy statement.');
+      reportError(error.message || 'Unable to update the privacy statement.');
     }
-  });
+  };
+
+  const reportStatus = (message, isError) => {
+    if (status) {
+      status.textContent = message;
+      status.classList.toggle('text-danger', isError);
+      status.classList.toggle('text-success', !isError);
+    } else {
+      window.alert(message);
+    }
+  };
+
+  const reportError = (message) => reportStatus(message, true);
+
+  if (editorForm && editor) {
+    editorForm.addEventListener('submit', (event) => saveNotice(event, editorForm, false));
+  }
+  if (uploadForm) {
+    uploadForm.addEventListener('submit', (event) => saveNotice(event, uploadForm, true));
+  }
 });

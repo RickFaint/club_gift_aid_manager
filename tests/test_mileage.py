@@ -31,11 +31,13 @@ from club_gift_aid_manager.db import (
     get_rate_schedule_for_date,
     get_summary,
     list_rate_schedules,
+    list_audit_events,
     list_destinations,
     list_declarations,
     list_donations,
     list_payment_reconciliation,
     list_payments,
+    list_people,
     save_destination_coordinates,
     update_donation,
 )
@@ -1050,6 +1052,145 @@ def test_login_requires_csrf_and_authenticates_database_user():
     )
     assert success.status_code == 302
     assert client.get("/people").status_code == 200
+    login_events = [
+        event for event in list_audit_events()
+        if event["action"] == "login_succeeded"
+    ]
+    assert len(login_events) == 1
+
+
+def test_login_rate_limit_is_persistent_and_does_not_store_raw_identifiers():
+    """Repeated login failures are throttled using pseudonymous database keys."""
+    client = app.test_client()
+    client.get("/login")
+    with client.session_transaction() as browser_session:
+        token = browser_session["_csrf_token"]
+
+    responses = [
+        client.post(
+            "/login",
+            data={
+                "username": "unknown-login-user",
+                "password": "incorrect-test-password",
+                "_csrf_token": token,
+            },
+        )
+        for _ in range(5)
+    ]
+
+    assert [response.status_code for response in responses] == [401, 401, 401, 401, 429]
+    with get_connection() as conn:
+        attempts = conn.execute("SELECT attempt_key FROM login_attempts").fetchall()
+    assert len(attempts) == 2
+    assert all(len(row["attempt_key"]) == 64 for row in attempts)
+    lockouts = [
+        event for event in list_audit_events()
+        if event["action"] == "login_rate_limited"
+    ]
+    failed_logins = [
+        event for event in list_audit_events()
+        if event["action"] == "login_failed"
+    ]
+    assert len(lockouts) == 1
+    assert len(failed_logins) == 5
+    assert "unknown-login-user" not in lockouts[0]["entity_id"]
+
+
+def test_write_and_audit_event_roll_back_together_when_audit_fails(monkeypatch):
+    """A failed audit insert cannot leave the corresponding business write committed."""
+    def fail_audit(**_kwargs):
+        raise RuntimeError("Simulated audit storage failure")
+
+    monkeypatch.setattr(app_module, "record_audit_event", fail_audit)
+    response = signed_in_client("admin").post(
+        "/people",
+        json={"name": "Must roll back"},
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+
+    assert response.status_code == 500
+    assert all(person["name"] != "Must roll back" for person in list_people())
+
+
+def test_role_denial_is_recorded_as_a_security_audit_event():
+    """A denied privilege escalation attempt is attributable without recording a URL ID."""
+    person = create_person(name="Audit denial volunteer")
+    response = signed_in_client("volunteer", person["id"]).get("/admin/audit")
+
+    assert response.status_code == 403
+    event = next(
+        event for event in list_audit_events()
+        if event["action"] == "permission_denied"
+    )
+    assert event["actor_user_id"] is not None
+    assert event["entity_type"] == "authorization"
+    assert event["entity_id"] == "audit_index"
+
+
+@pytest.mark.parametrize(
+    ("environment", "secret", "secure_cookie", "valid"),
+    [
+        ("invalid", "x" * 48, True, False),
+        ("production", None, True, False),
+        ("production", "x" * 31, True, False),
+        ("production", "x" * 48, False, False),
+        ("production", "x" * 48, True, True),
+        ("development", None, False, True),
+    ],
+)
+def test_deployment_configuration_requires_secure_production_settings(
+    environment, secret, secure_cookie, valid
+):
+    """Production requires a stable long secret and secure cookies."""
+    if valid:
+        app_module.validate_deployment_config(environment, secret, secure_cookie)
+    else:
+        with pytest.raises(RuntimeError):
+            app_module.validate_deployment_config(environment, secret, secure_cookie)
+
+
+def test_production_database_must_be_absolute_and_outside_source_checkout(tmp_path):
+    """Production refuses relative or checkout-local paths for live records."""
+    project_directory = tmp_path / "source"
+    project_directory.mkdir()
+    with pytest.raises(RuntimeError, match="absolute"):
+        app_module.validate_production_database_path(
+            Path("relative.sqlite3"),
+            project_directory,
+        )
+    with pytest.raises(RuntimeError, match="outside"):
+        app_module.validate_production_database_path(
+            project_directory / "data.sqlite3",
+            project_directory,
+        )
+    app_module.validate_production_database_path(
+        tmp_path / "persistent" / "data.sqlite3",
+        project_directory,
+    )
+
+
+def test_secure_session_cookie_and_security_headers_are_set(monkeypatch):
+    """HTTPS deployments can emit secure cookies and baseline response headers."""
+    monkeypatch.setitem(app.config, "SESSION_COOKIE_SECURE", True)
+    create_user(username="secure-cookie-user", password="a-secure-test-password", role="admin")
+    client = app.test_client()
+    login_page = client.get("/login")
+    with client.session_transaction() as browser_session:
+        token = browser_session["_csrf_token"]
+    response = client.post(
+        "/login",
+        data={
+            "username": "secure-cookie-user",
+            "password": "a-secure-test-password",
+            "_csrf_token": token,
+        },
+    )
+
+    assert "Secure" in response.headers["Set-Cookie"]
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert "Strict-Transport-Security" not in login_page.headers
 
 
 def test_volunteer_is_limited_to_own_trips_and_cannot_read_finances():
@@ -1596,6 +1737,116 @@ def test_admin_can_replace_privacy_notice_with_text_file(tmp_path, monkeypatch):
         event["entity_type"] == "privacy_notice" and event["action"] == "updated"
         for event in admin.get("/admin/audit").get_json()["items"]
     )
+
+
+def test_admin_can_type_and_save_privacy_notice(tmp_path, monkeypatch):
+    """Admins can edit notice text in the page; saved content remains escaped plain text."""
+    notice_path = tmp_path / "privacy-notice.txt"
+    notice_path.write_text("Old notice", encoding="utf-8")
+    monkeypatch.setattr(app_module, "PRIVACY_NOTICE_PATH", notice_path)
+    admin = signed_in_client()
+    editor_page = admin.get("/").get_data(as_text=True)
+    assert 'id="privacy-notice-editor"' in editor_page
+    assert "Old notice" in editor_page
+    assert "Save privacy statement" in editor_page
+    assert 'id="privacy-notice-editor"' not in signed_in_client("treasurer").get("/").get_data(as_text=True)
+
+    updated_notice = "Controller: Club <script>alert('no')</script>\nRetention and GDPR details."
+    response = admin.post(
+        "/admin/privacy-notice",
+        json={"notice": updated_notice},
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["notice"] == updated_notice
+    assert notice_path.read_text(encoding="utf-8") == updated_notice
+    rendered = admin.get("/").get_data(as_text=True)
+    assert "&lt;script&gt;" in rendered
+    assert "<script>alert('no')</script>" not in rendered
+    assert any(
+        event["entity_type"] == "privacy_notice" and event["action"] == "updated"
+        for event in admin.get("/admin/audit").get_json()["items"]
+    )
+
+
+def test_privacy_notice_editor_requires_admin_and_valid_csrf(tmp_path, monkeypatch):
+    """Typed notice changes are protected by both role authorization and CSRF."""
+    notice_path = tmp_path / "privacy-notice.txt"
+    notice_path.write_text("Current approved notice", encoding="utf-8")
+    monkeypatch.setattr(app_module, "PRIVACY_NOTICE_PATH", notice_path)
+    notice_data = {"notice": "Replacement notice"}
+    admin = signed_in_client()
+
+    missing_token = admin.post("/admin/privacy-notice", json=notice_data)
+    invalid_token = admin.post(
+        "/admin/privacy-notice",
+        json=notice_data,
+        headers={"X-CSRF-Token": "invalid-token"},
+    )
+    forbidden = signed_in_client("treasurer").post(
+        "/admin/privacy-notice",
+        json=notice_data,
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+
+    assert missing_token.status_code == 400
+    assert invalid_token.status_code == 400
+    assert forbidden.status_code == 403
+    assert notice_path.read_text(encoding="utf-8") == "Current approved notice"
+
+
+def test_privacy_notice_editor_enforces_utf8_byte_limit(tmp_path, monkeypatch):
+    """The notice limit applies to encoded bytes, including multibyte characters."""
+    notice_path = tmp_path / "privacy-notice.txt"
+    notice_path.write_text("Current approved notice", encoding="utf-8")
+    monkeypatch.setattr(app_module, "PRIVACY_NOTICE_PATH", notice_path)
+    admin = signed_in_client()
+    csrf = {"X-CSRF-Token": "test-csrf-token"}
+    max_size_notice = "£" * (64 * 1024 // len("£".encode("utf-8")))
+    assert len(max_size_notice.encode("utf-8")) == 64 * 1024
+
+    accepted = admin.post(
+        "/admin/privacy-notice",
+        json={"notice": max_size_notice},
+        headers=csrf,
+    )
+    oversized = admin.post(
+        "/admin/privacy-notice",
+        json={"notice": max_size_notice + "£"},
+        headers=csrf,
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.get_json()["notice"] == max_size_notice
+    assert oversized.status_code == 413
+    assert notice_path.read_text(encoding="utf-8") == max_size_notice
+
+
+@pytest.mark.parametrize(
+    ("notice", "status_code"),
+    [
+        pytest.param("", 400, id="empty"),
+        pytest.param(" " * 4, 400, id="whitespace"),
+        pytest.param("x" * (64 * 1024 + 1), 413, id="oversized"),
+    ],
+)
+def test_admin_privacy_notice_editor_rejects_empty_or_oversized_text(
+    tmp_path, monkeypatch, notice, status_code
+):
+    """Typed notice validation leaves the current statement unchanged on error."""
+    notice_path = tmp_path / "privacy-notice.txt"
+    notice_path.write_text("Current approved notice", encoding="utf-8")
+    monkeypatch.setattr(app_module, "PRIVACY_NOTICE_PATH", notice_path)
+
+    response = signed_in_client().post(
+        "/admin/privacy-notice",
+        json={"notice": notice},
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+
+    assert response.status_code == status_code
+    assert notice_path.read_text(encoding="utf-8") == "Current approved notice"
 
 
 def test_non_admin_cannot_upload_privacy_notice_and_bad_upload_preserves_current_text(tmp_path, monkeypatch):

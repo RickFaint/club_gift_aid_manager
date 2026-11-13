@@ -8,19 +8,21 @@ handlers validate input, call the persistence/business layers, and return JSON.
 from __future__ import annotations
 
 import csv
+import hashlib
 import hmac
 import io
 import os
 import secrets
 import sqlite3
 import tempfile
+import time
 from datetime import date, timedelta
 from functools import wraps
 from getpass import getpass
 from pathlib import Path
 
 from flask import Flask, Response, g, jsonify, redirect, render_template, render_template_string, request, session, url_for
-from werkzeug.security import check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from club_gift_aid_manager.config import get_declaration_text
 from club_gift_aid_manager.db import (
@@ -37,8 +39,12 @@ from club_gift_aid_manager.db import (
     create_user,
     anonymize_person,
     deactivate_declaration,
+    begin_request_transaction,
+    clear_login_failures,
     delete_destination,
     delete_trip,
+    finish_request_transaction,
+    get_login_lock_seconds,
     get_person,
     get_destination,
     get_declaration,
@@ -61,6 +67,7 @@ from club_gift_aid_manager.db import (
     list_trips,
     list_users,
     record_audit_event,
+    record_login_failure,
     update_person,
     update_donation,
     update_declaration,
@@ -81,14 +88,54 @@ from club_gift_aid_manager.routing import RouteLookupError, calculate_route_dist
 app = Flask(__name__)
 PRIVACY_NOTICE_PATH = Path(__file__).resolve().parent / "privacy-notice.txt"
 MAX_PRIVACY_NOTICE_BYTES = 64 * 1024
+DEPLOYMENT_ENV = os.environ.get("CLUB_GIFT_AID_ENV", "development").strip().lower()
+configured_secret = os.environ.get("CLUB_GIFT_AID_SECRET")
+secure_cookie = os.environ.get("CLUB_GIFT_AID_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
+
+
+def validate_deployment_config(environment, secret, cookie_secure):
+    """Reject production configurations that could expose sessions or use an ephemeral key."""
+    if environment not in {"development", "production"}:
+        raise RuntimeError("CLUB_GIFT_AID_ENV must be 'development' or 'production'.")
+    if environment == "production" and (
+        not secret or len(secret) < 32 or not cookie_secure
+    ):
+        raise RuntimeError(
+            "Production requires a stable CLUB_GIFT_AID_SECRET of at least 32 characters "
+            "and CLUB_GIFT_AID_COOKIE_SECURE=true."
+        )
+
+
+def validate_production_database_path(database_path, project_directory):
+    """Keep live records in an explicitly configured persistent path outside the checkout."""
+    path = Path(database_path)
+    if not path.is_absolute():
+        raise RuntimeError("Production database path must be absolute.")
+    try:
+        path.resolve().relative_to(Path(project_directory).resolve())
+    except ValueError:
+        return
+    raise RuntimeError("Production database path must be outside the source checkout.")
+
+
+validate_deployment_config(DEPLOYMENT_ENV, configured_secret, secure_cookie)
+if DEPLOYMENT_ENV == "production":
+    configured_database_path = os.environ.get("CLUB_GIFT_AID_DB")
+    if not configured_database_path:
+        raise RuntimeError(
+            "Production requires CLUB_GIFT_AID_DB to be an absolute path in persistent storage."
+        )
+    validate_production_database_path(configured_database_path, Path(__file__).resolve().parent)
 app.config.update(
-    SECRET_KEY=os.environ.get("CLUB_GIFT_AID_SECRET") or secrets.token_hex(32),
+    SECRET_KEY=configured_secret or secrets.token_hex(32),
+    DEPLOYMENT_ENV=DEPLOYMENT_ENV,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=os.environ.get("CLUB_GIFT_AID_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"},
+    SESSION_COOKIE_SECURE=secure_cookie,
     PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
     MAX_CONTENT_LENGTH=1024 * 1024,
 )
+DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_urlsafe(32))
 
 HTML_FORM = """
 {# Small standalone claim form retained for the /claim route. #}
@@ -147,12 +194,19 @@ HTML_FORM = """
         <div class=\"modal-body\"><pre class=\"privacy-notice-text\" id=\"privacy-notice-content\">{{ privacy_notice }}</pre></div>
         {% if current_user and current_user.role == 'admin' %}
         <div class=\"modal-body border-top\">
+          <form id=\"privacy-notice-editor-form\" class=\"mb-4\">
+            <label class=\"form-label\" for=\"privacy-notice-editor\">Edit privacy statement</label>
+            <textarea id=\"privacy-notice-editor\" class=\"form-control\" name=\"notice\" rows=\"12\" maxlength=\"65536\" required>{{ privacy_notice }}</textarea>
+            <div class=\"form-text\">Enter the GDPR/privacy information to show to all users. Plain text only, up to 64 KB.</div>
+            <button class=\"btn btn-primary btn-sm mt-2\" type=\"submit\">Save privacy statement</button>
+          </form>
           <form id=\"privacy-notice-upload-form\">
-            <label class=\"form-label\" for=\"privacy-notice-file\">Replace statement with a text file</label>
+            <label class=\"form-label\" for=\"privacy-notice-file\">Or replace from a text file</label>
             <input id=\"privacy-notice-file\" class=\"form-control\" type=\"file\" name=\"file\" accept=\".txt,text/plain\" required />
             <div class=\"form-text\">UTF-8 .txt file, up to 64 KB. The new statement is shown on all pages.</div>
             <button class=\"btn btn-primary btn-sm mt-2\" type=\"submit\">Upload statement</button>
           </form>
+          <div id=\"privacy-notice-status\" class=\"small mt-2\" role=\"status\" aria-live=\"polite\"></div>
         </div>
         {% endif %}
         <div class=\"modal-footer\"><button type=\"button\" class=\"btn btn-light\" data-bs-dismiss=\"modal\">Close</button></div>
@@ -160,7 +214,7 @@ HTML_FORM = """
     </div>
     <script src=\"https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js\"></script>
     <script src=\"{{ url_for('static', filename='js/help.js', v='1') }}\"></script>
-    <script src=\"{{ url_for('static', filename='js/privacy.js', v='1') }}\"></script>
+    <script src=\"{{ url_for('static', filename='js/privacy.js', v='2') }}\"></script>
   </body>
 </html>
 """
@@ -197,6 +251,14 @@ def roles_required(*roles):
             if user is None:
                 return jsonify({"error": "Authentication required."}), 401
             if user["role"] not in roles:
+                record_audit_event(
+                    actor_user_id=user["id"],
+                    actor_username=user["username"],
+                    action="permission_denied",
+                    entity_type="authorization",
+                    entity_id=request.endpoint or "unknown",
+                    changed_fields=(request.method,),
+                )
                 return jsonify({"error": "You do not have permission to perform this action."}), 403
             return view(*args, **kwargs)
         return wrapped
@@ -238,6 +300,7 @@ def enforce_security():
         supplied = request.headers.get("X-CSRF-Token") or request.form.get("_csrf_token", "")
         if not expected or not supplied or not hmac.compare_digest(expected, supplied):
             return jsonify({"error": "CSRF token missing or invalid."}), 400
+        begin_request_transaction()
         return None
 
     # Treat a stale, missing, or deactivated account as an unauthenticated session.
@@ -257,7 +320,33 @@ def enforce_security():
         supplied = request.headers.get("X-CSRF-Token") or request.form.get("_csrf_token", "")
         if not expected or not supplied or not hmac.compare_digest(expected, supplied):
             return jsonify({"error": "CSRF token missing or invalid."}), 400
+        begin_request_transaction()
     return None
+
+
+@app.after_request
+def finalize_request_transaction(response):
+    """Commit successful writes and security events, rolling back failed operations."""
+    commit_status = response.status_code < 400
+    commit_security_denial = response.status_code == 403
+    commit_login_failure = (
+        request.endpoint == "login" and response.status_code in {401, 429}
+    )
+    finish_request_transaction(
+        commit=commit_status or commit_security_denial or commit_login_failure
+    )
+    if DEPLOYMENT_ENV == "production":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
+
+
+@app.teardown_request
+def rollback_unfinished_transaction(_error):
+    """Ensure exceptions cannot leave an open or partially committed request transaction."""
+    finish_request_transaction(commit=False)
 
 
 @app.context_processor
@@ -286,19 +375,93 @@ def login():
     """Verify a password hash, rotate the session, and send the user to home."""
     username = request.form.get("username", "")
     password = request.form.get("password", "")
+    attempt_keys = login_attempt_keys(username, request.remote_addr)
+    now = int(time.time())
+    lock_seconds = get_login_lock_seconds(attempt_keys, now=now)
+    if lock_seconds:
+        return render_template(
+            "login.html",
+            error="Incorrect username or password. Try again later.",
+        ), 429
+
     user = get_user_by_username(username)
-    if user and user["is_active"] and check_password_hash(user["password_hash"], password):
+    password_matches = check_password_hash(
+        user["password_hash"] if user else DUMMY_PASSWORD_HASH,
+        password,
+    )
+    if user and user["is_active"] and password_matches:
+        clear_login_failures(attempt_keys)
         session.clear()
         session["user_id"] = user["id"]
         session["_csrf_token"] = secrets.token_urlsafe(32)
         session.permanent = True
+        record_audit_event(
+            actor_user_id=user["id"],
+            actor_username=user["username"],
+            action="login_succeeded",
+            entity_type="authentication",
+            entity_id=user["id"],
+        )
         return redirect(url_for("index"))
-    return render_template("login.html", error="Incorrect username or password."), 401
+
+    newly_locked, lock_seconds = record_login_failure(
+        attempt_keys,
+        now=now,
+        window_seconds=15 * 60,
+        max_failures={attempt_keys[0]: 30, attempt_keys[1]: 5},
+        lockout_seconds=15 * 60,
+    )
+    record_audit_event(
+        actor_user_id=None,
+        actor_username="anonymous",
+        action="login_failed",
+        entity_type="authentication",
+        entity_id=attempt_keys[1],
+    )
+    if newly_locked:
+        record_audit_event(
+            actor_user_id=None,
+            actor_username="anonymous",
+            action="login_rate_limited",
+            entity_type="authentication",
+            entity_id=attempt_keys[0],
+        )
+    return render_template(
+        "login.html",
+        error=(
+            "Incorrect username or password. Try again later."
+            if lock_seconds
+            else "Incorrect username or password."
+        ),
+    ), 429 if lock_seconds else 401
+
+
+def login_attempt_keys(username, remote_address):
+    """Derive non-reversible rate-limit keys without storing usernames or IP addresses."""
+    normalized_user = username.strip().casefold()[:256]
+    normalized_address = remote_address or "unknown"
+    secret = app.config["SECRET_KEY"].encode("utf-8")
+    values = (
+        f"ip:{normalized_address}",
+        f"ip-user:{normalized_address}:{normalized_user}",
+    )
+    return tuple(
+        hmac.new(secret, value.encode("utf-8"), hashlib.sha256).hexdigest()
+        for value in values
+    )
 
 
 @app.post("/logout")
 def logout():
     """Discard login and CSRF state before returning to the sign-in page."""
+    user = g.current_user
+    record_audit_event(
+        actor_user_id=user["id"],
+        actor_username=user["username"],
+        action="logout",
+        entity_type="authentication",
+        entity_id=user["id"],
+    )
     session.clear()
     return redirect(url_for("login_page"))
 
@@ -306,20 +469,29 @@ def logout():
 @app.post("/admin/privacy-notice")
 @roles_required("admin")
 def privacy_notice_upload():
-    """Replace the shared privacy statement using an administrator-uploaded text file."""
+    """Replace the shared privacy statement from admin-entered text or an uploaded file."""
     upload = request.files.get("file")
-    if upload is None or not upload.filename:
-        return jsonify({"error": "Select a .txt file to upload."}), 400
-    if not upload.filename.lower().endswith(".txt"):
-        return jsonify({"error": "The uploaded file must have a .txt extension."}), 400
-
-    content = upload.read(MAX_PRIVACY_NOTICE_BYTES + 1)
-    if len(content) > MAX_PRIVACY_NOTICE_BYTES:
-        return jsonify({"error": "The privacy statement must be 64 KB or smaller."}), 413
-    try:
-        notice = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return jsonify({"error": "The privacy statement must be a UTF-8 text file."}), 400
+    if upload is not None:
+        if not upload.filename:
+            return jsonify({"error": "Select a .txt file to upload."}), 400
+        if not upload.filename.lower().endswith(".txt"):
+            return jsonify({"error": "The uploaded file must have a .txt extension."}), 400
+        content = upload.read(MAX_PRIVACY_NOTICE_BYTES + 1)
+        if len(content) > MAX_PRIVACY_NOTICE_BYTES:
+            return jsonify({"error": "The privacy statement must be 64 KB or smaller."}), 413
+        try:
+            notice = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return jsonify({"error": "The privacy statement must be a UTF-8 text file."}), 400
+    else:
+        notice = request.form.get("notice")
+        if notice is None:
+            payload = request.get_json(silent=True) or {}
+            notice = payload.get("notice")
+        if not isinstance(notice, str):
+            return jsonify({"error": "Enter the privacy statement before saving."}), 400
+        if len(notice.encode("utf-8")) > MAX_PRIVACY_NOTICE_BYTES:
+            return jsonify({"error": "The privacy statement must be 64 KB or smaller."}), 413
     if not notice.strip():
         return jsonify({"error": "The privacy statement cannot be empty."}), 400
     if "\x00" in notice:
@@ -1473,4 +1645,6 @@ if __name__ == "__main__":
             raise SystemExit("Username is already in use.") from exc
         print(f"Created administrator account {user['username']!r}.")
     else:
+        if DEPLOYMENT_ENV == "production":
+            raise SystemExit("Production deployments must use the configured WSGI server.")
         app.run(debug=os.environ.get("FLASK_DEBUG", "false").lower() in {"1", "true", "yes"})

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextvars import ContextVar
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -30,12 +31,80 @@ DB_PATH = Path(os.environ.get(
     str(Path(__file__).resolve().parent.parent / "club_gift_aid_manager.sqlite3"),
 ))
 
+_REQUEST_CONNECTION: ContextVar[sqlite3.Connection | None] = ContextVar(
+    "club_gift_aid_request_connection",
+    default=None,
+)
+
+
+class _RequestConnection(sqlite3.Connection):
+    """Keep helper-level commits and closes inside the surrounding request transaction."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.defer_commit = False
+        self.defer_close = False
+
+    def commit(self) -> None:
+        if not self.defer_commit:
+            super().commit()
+
+    def close(self) -> None:
+        if not self.defer_close:
+            super().close()
+
 
 def get_connection() -> sqlite3.Connection:
     """Open the configured SQLite database and return rows by column name."""
-    conn = sqlite3.connect(DB_PATH)
+    request_connection = _REQUEST_CONNECTION.get()
+    if request_connection is not None:
+        return request_connection
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "posix":
+        descriptor = os.open(DB_PATH, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+    conn = sqlite3.connect(DB_PATH, factory=_RequestConnection)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def begin_request_transaction() -> None:
+    """Share one deferred-commit connection across all database helpers in a write request."""
+    if _REQUEST_CONNECTION.get() is not None:
+        raise RuntimeError("A request database transaction is already active.")
+    conn = get_connection()
+    if not isinstance(conn, _RequestConnection):
+        conn.close()
+        raise RuntimeError("Request transactions require the managed SQLite connection.")
+    try:
+        conn.execute("BEGIN")
+    except Exception:
+        conn.close()
+        raise
+    conn.defer_commit = True
+    conn.defer_close = True
+    _REQUEST_CONNECTION.set(conn)
+
+
+def finish_request_transaction(*, commit: bool) -> None:
+    """Commit a successful request or roll back its changes and audit events together."""
+    conn = _REQUEST_CONNECTION.get()
+    if conn is None:
+        return
+    _REQUEST_CONNECTION.set(None)
+    conn.defer_commit = False
+    conn.defer_close = False
+    try:
+        if commit:
+            sqlite3.Connection.commit(conn)
+        else:
+            sqlite3.Connection.rollback(conn)
+    finally:
+        sqlite3.Connection.close(conn)
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -199,6 +268,14 @@ def create_app_database() -> None:
                 changed_fields TEXT NOT NULL DEFAULT '[]',
                 occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
+
+            -- Short-lived, pseudonymous counters throttle repeated login guesses.
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                attempt_key TEXT PRIMARY KEY,
+                failure_count INTEGER NOT NULL,
+                window_started_at INTEGER NOT NULL,
+                locked_until INTEGER NOT NULL DEFAULT 0
+            );
             """
         )
         # Preserve the app's former rates for all dates before the first admin change.
@@ -271,7 +348,7 @@ def create_app_database() -> None:
 
 def record_audit_event(
     *,
-    actor_user_id: int,
+    actor_user_id: int | None,
     actor_username: str,
     action: str,
     entity_type: str,
@@ -293,6 +370,106 @@ def record_audit_event(
                 str(entity_id),
                 json.dumps(sorted(set(changed_fields))),
             ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_login_lock_seconds(
+    attempt_keys: Iterable[str],
+    *,
+    now: int,
+    window_seconds: int = 15 * 60,
+) -> int:
+    """Return active lockouts and remove expired transient counters."""
+    keys = tuple(set(attempt_keys))
+    if not keys:
+        return 0
+    placeholders = ",".join("?" for _ in keys)
+    conn = get_connection()
+    try:
+        conn.execute(
+            "DELETE FROM login_attempts WHERE locked_until <= ? AND window_started_at < ?",
+            (now, now - window_seconds),
+        )
+        row = conn.execute(
+            f"SELECT MAX(locked_until) AS locked_until FROM login_attempts "
+            f"WHERE attempt_key IN ({placeholders})",
+            keys,
+        ).fetchone()
+        return max(0, int(row["locked_until"] or 0) - now)
+    finally:
+        conn.close()
+
+
+def record_login_failure(
+    attempt_keys: Iterable[str],
+    *,
+    now: int,
+    window_seconds: int,
+    max_failures: int | dict[str, int],
+    lockout_seconds: int,
+) -> tuple[bool, int]:
+    """Increment login counters and report whether this failure began a lockout."""
+    keys = tuple(set(attempt_keys))
+    if not keys:
+        raise ValueError("At least one login attempt key is required.")
+    conn = get_connection()
+    newly_locked = False
+    longest_lock = 0
+    try:
+        conn.execute(
+            "DELETE FROM login_attempts WHERE window_started_at < ? AND locked_until < ?",
+            (now - window_seconds - lockout_seconds, now),
+        )
+        for key in keys:
+            row = conn.execute(
+                "SELECT failure_count, window_started_at, locked_until "
+                "FROM login_attempts WHERE attempt_key = ?",
+                (key,),
+            ).fetchone()
+            if row is None or now - row["window_started_at"] >= window_seconds:
+                failure_count = 1
+                window_started_at = now
+            else:
+                failure_count = row["failure_count"] + 1
+                window_started_at = row["window_started_at"]
+            threshold = (
+                max_failures[key] if isinstance(max_failures, dict) else max_failures
+            )
+            locked_until = now + lockout_seconds if failure_count >= threshold else 0
+            newly_locked = newly_locked or (
+                locked_until > now and (row is None or row["locked_until"] <= now)
+            )
+            conn.execute(
+                """INSERT INTO login_attempts (
+                       attempt_key, failure_count, window_started_at, locked_until
+                   ) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(attempt_key) DO UPDATE SET
+                       failure_count = excluded.failure_count,
+                       window_started_at = excluded.window_started_at,
+                       locked_until = excluded.locked_until""",
+                (key, failure_count, window_started_at, locked_until),
+            )
+            longest_lock = max(longest_lock, locked_until - now)
+        conn.commit()
+        return newly_locked, max(0, longest_lock)
+    finally:
+        conn.close()
+
+
+def clear_login_failures(attempt_keys: Iterable[str]) -> None:
+    """Clear the successful user's and source address's transient failure counters."""
+    keys = tuple(set(attempt_keys))
+    if not keys:
+        return
+    placeholders = ",".join("?" for _ in keys)
+    conn = get_connection()
+    try:
+        conn.execute(
+            f"DELETE FROM login_attempts WHERE attempt_key IN ({placeholders})",
+            keys,
         )
         conn.commit()
     finally:
@@ -652,8 +829,10 @@ def create_destination(
 def create_destinations(locations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Create a validated set of locations atomically."""
     conn = get_connection()
+    request_scoped = _REQUEST_CONNECTION.get() is conn
     try:
-        conn.execute("BEGIN IMMEDIATE")
+        if not request_scoped:
+            conn.execute("BEGIN IMMEDIATE")
         existing_conflicts = []
         seen_names = set()
         ascii_lower = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")

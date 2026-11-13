@@ -71,12 +71,19 @@
         <div class="modal-body"><pre class="privacy-notice-text" id="privacy-notice-content">{{ privacy_notice }}</pre></div>
         {% if current_user.role == 'admin' %}
         <div class="modal-body border-top">
+          <form id="privacy-notice-editor-form" class="mb-4">
+            <label class="form-label" for="privacy-notice-editor">Edit privacy statement</label>
+            <textarea id="privacy-notice-editor" class="form-control" name="notice" rows="12" maxlength="65536" required>{{ privacy_notice }}</textarea>
+            <div class="form-text">Enter the GDPR/privacy information to show to all users. Plain text only, up to 64 KB.</div>
+            <button class="btn btn-primary btn-sm mt-2" type="submit">Save privacy statement</button>
+          </form>
           <form id="privacy-notice-upload-form">
-            <label class="form-label" for="privacy-notice-file">Replace statement with a text file</label>
+            <label class="form-label" for="privacy-notice-file">Or replace from a text file</label>
             <input id="privacy-notice-file" class="form-control" type="file" name="file" accept=".txt,text/plain" required />
             <div class="form-text">UTF-8 .txt file, up to 64 KB. The new statement is shown on all pages.</div>
             <button class="btn btn-primary btn-sm mt-2" type="submit">Upload statement</button>
           </form>
+          <div id="privacy-notice-status" class="small mt-2" role="status" aria-live="polite"></div>
         </div>
         {% endif %}
         <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Close</button></div>
@@ -85,7 +92,7 @@
     {# Bootstrap provides responsive components; app.js wires forms and tables. #}
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/help.js', v='2') }}"></script>
-    <script src="{{ url_for('static', filename='js/privacy.js', v='1') }}"></script>
+    <script src="{{ url_for('static', filename='js/privacy.js', v='2') }}"></script>
     <script>window.APP_ROLE = {{ current_user.role|tojson }};</script>
     <script src="{{ url_for('static', filename='js/app.js', v='6') }}"></script>
   </body>
