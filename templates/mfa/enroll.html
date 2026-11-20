@@ -1,0 +1,19 @@
+{% set page_title = "Scan your authenticator code" %}
+{% include "mfa/_shell_start.html" %}
+<p>Scan this QR code with your authenticator app. The QR image is generated locally and is not sent to another service.</p>
+<div class="text-center my-4">
+  <img src="{{ qr_data_uri }}" width="260" height="260" alt="Authenticator enrollment QR code" />
+</div>
+<details class="mb-4">
+  <summary>Enter the setup key manually</summary>
+  <p class="mt-2 mb-1">Account: <strong>{{ pending_user.username }}</strong></p>
+  <p class="font-monospace text-break user-select-all">{{ manual_secret }}</p>
+  <p class="small text-muted">Keep this key private. Anyone with it can generate your authentication codes.</p>
+</details>
+<form method="post" action="{{ url_for('mfa.setup_verify') }}">
+  <input type="hidden" name="_csrf_token" value="{{ csrf_token }}" />
+  <label class="form-label" for="mfa-code">Six-digit authentication code</label>
+  <input class="form-control mb-3" id="mfa-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus />
+  <button class="btn btn-primary" type="submit">Verify and enable MFA</button>
+</form>
+{% include "mfa/_shell_end.html" %}

@@ -1,5 +1,10 @@
 # Security and deployment operations
 
+The source-assisted OWASP Top 10:2025 and ASVS 5.0.0 review, evidence, fixes, and
+residual risks are recorded in [`SECURITY-REVIEW.md`](./SECURITY-REVIEW.md). Repeat
+dependency audits for every release and independently test the deployed service
+before public use.
+
 This application contains contact details, mileage records, donation and payment records, and Gift Aid declaration information. These controls support safer operation; they do not establish legal compliance. The club, as data controller, should review its purposes, lawful bases, retention schedule, hosting terms, and response arrangements before entering real data.
 
 ## Production settings
@@ -18,7 +23,13 @@ Use the hosting provider's WSGI deployment, not `python app.py` or Flask's devel
 
 For example, generate a secret with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Store it in the provider's private application configuration. If the provider has no environment-variable facility, put it only in a host-private WSGI configuration with restricted access; never paste it into this repository, a public issue, or a shared log.
 
+Apply migrations as a separate deployment step before restarting the web process. Back up the database, run `python manage.py db-current`, `python manage.py db-upgrade`, and `python manage.py db-verify`, then start the application. Production startup checks the revision, tables, columns, and required triggers and indexes in read-only mode. If verification reports missing schema objects at the current revision, examine a restored copy before attempting repairs. For a pre-Alembic database, validate a restored copy first. `python manage.py db-stamp-head` records the revision only after the physical checks pass and runs no migration DDL.
+
 On PythonAnywhere, create a **manual Flask web app** using the same Python version as the virtual environment, point the Web tab at the virtual environment, and edit the WSGI configuration file to import `app` from this project as `application`. Configure HTTPS in the Web tab and verify that the browser uses HTTPS before entering real data. A suitable layout is `/home/<username>/club-gift-aid-data/club.sqlite3` for the database and `/home/<username>/club-gift-aid-backups/` for backups. Neither may be under the repository, a static mapping, OneDrive, or Dropbox. List any additional web-accessible roots as comma-separated absolute paths in `GIFT_AID_WEB_ROOTS`.
+
+Set `CLUB_GIFT_AID_PROXY_MODE=pythonanywhere` in that private WSGI configuration. PythonAnywhere documents that `remote_addr` is the internal load balancer and that its load balancer supplies the received client address in `X-Real-IP`. The application validates that header for login throttling and ignores the untrusted `X-Forwarded-For` chain. After reloading the web app, test from two different networks and review the pseudonymous throttling/audit behavior; a missing or malformed trusted header makes login fail closed with HTTP 400.
+
+Set `CLUB_GIFT_AID_TRUSTED_HOSTS` to the comma-separated canonical hostnames served by the deployment, for example `gift-aid.example.org`. Production startup refuses an empty allowlist and Flask rejects other `Host` headers. Configure the public proxy/web server—not Flask—to redirect port 80 to `https://gift-aid.example.org$request_uri`, and configure that hostname as the provider's canonical HTTPS domain. Do not trust arbitrary forwarded-host or forwarded-protocol headers. Test the canonical HTTPS redirect and an invalid `Host` header after every proxy change.
 
 Only the PythonAnywhere account owner and explicitly authorised operators should have shell, database, backup, WSGI configuration, or key access. The application sets data and backup directories to mode `0700` and database/backup files to `0600` on POSIX. Production is refused on Windows because POSIX modes do not harden Windows ACLs. Windows is development-only and emits a warning; use fake data there.
 
@@ -44,7 +55,7 @@ Encryption-key rotation procedure:
 2. Reload the web app and confirm existing records can be read.
 3. Create and verify a protected backup using the combined key list.
 4. Stop application writes and run `python backup.py rotate-keys --database /home/<username>/club-gift-aid-data/club.sqlite3`.
-5. Create another backup, run `python backup.py verify <backup-file>`, and test the application.
+5. Verify a new backup with `python backup.py verify <backup-file>` using just the new key for that check. Verification checks SQLite relationships and decrypts all encrypted fields present, including audit usernames and MFA secrets. Test application access after rotating.
 6. Remove retired keys only after the live database and every retained backup that must remain readable has been rotated or expired.
 
 The blind-index key is stable. Changing it requires an offline rebuild of both blind-index columns and is not part of routine Fernet rotation.
@@ -59,7 +70,7 @@ set -a && . /home/<username>/.club-gift-aid-secrets && set +a && cd /home/<usern
 
 The default retention is 30 days. A successful run verifies the new backup, then deletes only recognized `club-gift-aid-*.sqlite3.backup` files older than the configured period. Restrict scheduled-task logs because they contain operational paths. Keys must be stored separately from backups.
 
-At least quarterly, copy a selected backup to a separate private test directory, run `python backup.py verify /private/path/to/file`, and start an isolated application instance against the restored file with the correct keys. Confirm representative records can be read and securely delete the test copy. Record the exercise without personal values:
+Schedule `python backup.py restore-test /private/path/to/latest.backup` at least weekly. It restores into a private temporary database, runs SQLite integrity checks, decrypts a representative sensitive field with the configured keys, confirms application tables are readable, and deletes the restored copy. Alert on a non-zero exit. At least quarterly, additionally start an isolated application instance against a restored copy and confirm representative workflows. Record the exercise without personal values:
 
 - Last restore-test date: ____________________
 - Tested by: ____________________
@@ -70,23 +81,43 @@ At least quarterly, copy a selected backup to a separate private test directory,
 
 ## Login and audit controls
 
+Administrator and treasurer accounts must enroll TOTP MFA after their password is
+accepted. Enrollment secrets are encrypted, recovery codes are shown once and stored
+as keyed hashes, successful codes cannot be replayed, and repeated failures cause a
+temporary lock. Keep at least one recovery code separate from the enrolled phone.
+
+An MFA reset is an account-recovery action, not routine support. Verify the person's
+identity using a club-approved offline method before selecting **Reset MFA** on the
+User accounts page. The action is audited and invalidates all target sessions. Never
+ask a user to send their authenticator secret, six-digit code, or recovery code by
+email, chat, or telephone.
+
+Use the same offline identity-verification process before an assisted password reset.
+Set a unique temporary password through **User accounts** and provide it through an
+approved private channel. The reset invalidates all target sessions and the temporary
+credential can access only the mandatory replacement form. Never send a temporary
+password and username together through the same channel, and never record passwords
+in tickets, audit notes, or shared documents.
+
 The login flow limits repeated failures for a source address and for a source-address/username pair, and stores HMAC-derived keys rather than raw addresses or usernames. The account-pair limit is five failures in 15 minutes; the source-address limit is 30 failures in 15 minutes. A threshold starts a 15-minute lockout. These are basic protections, not a substitute for MFA or provider-level abuse monitoring. The app does not trust a caller-supplied `X-Forwarded-For` header; confirm that the hosting platform provides a reliable client address to the WSGI request.
 
-Creating or changing accounts, publishing the privacy notice, and changing mileage rates require a password login within the previous 15 minutes. If the window expires, sign out and sign in again before retrying. Role changes and deactivation invalidate existing sessions. Enable MFA on every hosting/operator account; application-user MFA still requires an approved identity-provider or enrollment/recovery design and must not be represented as enabled until that is deployed and tested.
+Creating or changing accounts, resetting passwords or MFA, publishing the privacy notice, and changing mileage rates require a password login within the previous 15 minutes. If the window expires, sign out and sign in again before retrying. Role changes, deactivation, password reset, and MFA reset invalidate existing sessions. Enable MFA on every hosting/operator account as well as the application-level MFA required for administrators and treasurers.
 
 Successful login/logout, failed logins, login lockouts, permission denials, and audited record changes are stored in the same SQLite database. Login identifiers are represented by HMAC-derived keys in security events. Write requests and their audit records are committed together. Database triggers reject application-level update and deletion of audit rows. A database owner can still remove those triggers, so this is not a substitute for a separately controlled copy.
 
 Set a dedicated `GIFT_AID_AUDIT_EXPORT_KEY` of at least 32 random characters in the protected operator environment, then regularly run `python audit_export.py create /private/audit/club-audit.json`. The destination must be outside the repository, web roots, and synchronized folders. Transfer it to a separately controlled log/evidence store. Verify a received copy with `python audit_export.py verify /private/audit/club-audit.json`; verification fails if signed metadata or events changed. Restrict export contents because they include usernames and record identifiers. Review the admin audit page or signed export for repeated login throttling, permission denials, account changes, and unexpected bulk activity. Alert delivery and immutable external retention must be configured in the chosen hosting/logging service.
 
+Application logs are newline-delimited JSON with event names and request IDs. Metadata is allowlisted; credentials, encryption keys, cookies, personal contact fields, submitted values, and arbitrary exception messages are not emitted. Send stdout to a restricted log collector. Configure alerts for `login_throttled`, `permission_denied`, `import_failed`, `backup_failed`, `database_integrity_failed`, and `routing_service_unavailable`. As a provider-neutral fallback, run `python monitoring.py /private/logs/application.jsonl --window-minutes 15`; a non-zero exit means a threshold was crossed and should trigger the scheduler's alert channel. Tune thresholds only after recording the reason and response owner.
+
 ## Retention and privacy notice
 
-The supplied notice says records should be kept only as long as needed under a club-approved retention schedule. This application does not calculate retention deadlines or automatically delete records and backups. Before use, the club should approve periods or criteria for accounts, contact details, Gift Aid declarations/evidence, trips, donations, payments, audit records, and backups; assign an owner; and define how anonymisation or erasure requests are assessed against legal recordkeeping duties. Then publish the actual schedule/contact details and update the notice. Do not invent a single period for all record types.
+Copy `retention-policy.example.json` outside the repository, approve its log and backup periods, and schedule `python retention.py /private/retention-policy.json --apply`. Run without `--apply` first to preview counts. The job deletes only `*.jsonl` operational logs and recognized backup names beyond their periods, and purges expired completed in-process import status records. Personal records are never selected from age alone: after a documented legal review, place only specifically approved person IDs in `approved_person_ids`; the job uses the existing anonymisation workflow and preserves financial/audit history. Keep this approval file private because IDs are operational identifiers. Audit records are excluded from automated deletion. The controller must separately approve retention criteria for Gift Aid evidence, trips, donations, payments, and audit evidence before any future destructive automation is added.
 
 Privacy notices are stored in the `privacy_notice_versions` table with a stable version ID, effective and published dates, the complete text, and its SHA-256. Database triggers prohibit update and deletion of published rows. Admin publication creates an audit event; the current notice is the latest version, and `/privacy-notice/<id>` serves retained history. Each new Gift Aid declaration stores the notice version ID and digest that applied when it was created. The repository's `privacy-notice.txt` is only the seed for a newly created database.
 
 Administrators can retrieve `/people/<person_id>/export` to assemble that person's contact, trip, declaration, donation, and payment records for DSAR review. Treat the export as sensitive, verify the requester's identity and legal scope outside the application, review exemptions/third-party information, and transfer any approved response through an authorised secure channel. The endpoint supports review; it does not automate the controller's legal decision.
 
-Trip and destination CSV uploads are limited both to Flask's configured 1 MiB request size and to 1,000 data rows. Split larger batches. Imports remain synchronous and atomic; monitor worker time and external routing availability during planned bulk work.
+CSV uploads are limited both to Flask's configured 1 MiB request size and to 10,000 data rows. Split larger batches. Imports run through a bounded background queue and remain atomic. Completed route lookups are cached in the database for one hour and are invalidated when either location changes. The bundled queue is process-local, so production must set `CLUB_GIFT_AID_WEB_PROCESSES=1`. Before deploying multiple web processes, replace `club_gift_aid_manager.services.imports` behind its stable submission/status interface with a shared durable queue; startup rejects a declared multi-process production configuration until that is done.
 
 ## Incident response
 

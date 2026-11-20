@@ -1,0 +1,26 @@
+{% set page_title = "Enter your authentication code" %}
+{% include "mfa/_shell_start.html" %}
+<p>Open your authenticator app and enter the current six-digit code for Club Gift Aid Manager.</p>
+<form method="post" action="{{ url_for('mfa.challenge') }}">
+  <input type="hidden" name="_csrf_token" value="{{ csrf_token }}" />
+  <input type="hidden" name="method" value="totp" />
+  <label class="form-label" for="mfa-code">Six-digit authentication code</label>
+  <input class="form-control mb-3" id="mfa-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required autofocus />
+  <button class="btn btn-primary" type="submit">Sign in</button>
+</form>
+<hr class="my-4" />
+<details {% if selected_method == 'recovery' %}open{% endif %}>
+  <summary>Use a recovery code instead</summary>
+  <form class="mt-3" method="post" action="{{ url_for('mfa.challenge') }}">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}" />
+    <input type="hidden" name="method" value="recovery" />
+    <label class="form-label" for="recovery-code">Single-use recovery code</label>
+    <input class="form-control mb-3 font-monospace" id="recovery-code" name="code" autocomplete="one-time-code" required />
+    <button class="btn btn-outline-primary" type="submit">Use recovery code</button>
+  </form>
+</details>
+<form class="mt-4" method="post" action="{{ url_for('mfa.cancel') }}">
+  <input type="hidden" name="_csrf_token" value="{{ csrf_token }}" />
+  <button class="btn btn-link px-0" type="submit">Cancel and return to sign in</button>
+</form>
+{% include "mfa/_shell_end.html" %}

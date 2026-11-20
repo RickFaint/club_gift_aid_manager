@@ -1,17 +1,42 @@
-﻿"""Auth routes.
+"""Auth routes.
 
 A Blueprint is Flask's way of collecting related URL handlers.  Defining a
 route here does not start a second application: create_app() later registers
 this collection on the one Flask application object.
 """
 
+import logging
+
 from flask import Blueprint
 
-from .shared import *  # noqa: F403 - shared view vocabulary is intentionally centralised
+from .shared import (
+    DUMMY_PASSWORD_HASH,
+    check_password_hash,
+    clear_login_failures,
+    current_app,
+    g,
+    get_login_lock_seconds,
+    get_user_by_username,
+    hashlib,
+    hmac,
+    record_audit_event,
+    record_login_failure,
+    redirect,
+    render_template,
+    request,
+    secrets,
+    session,
+    time,
+    url_for,
+)
 from ..auth.decorators import roles_required
+from ..security.proxy import ProxyAddressError, resolve_client_address
+from ..core.logging import log_event
 
 
 blueprint = Blueprint("auth", __name__)
+logger = logging.getLogger(__name__)
+
 
 @blueprint.get("/login")
 def login_page():
@@ -24,10 +49,25 @@ def login():
     """Verify a password hash, rotate the session, and send the user to home."""
     username = request.form.get("username", "")
     password = request.form.get("password", "")
-    attempt_keys = login_attempt_keys(username, request.remote_addr)
+    try:
+        client_address = resolve_client_address(request, current_app.config["PROXY_MODE"])
+    except ProxyAddressError:
+        # Do not process a password when the configured trusted proxy contract is broken.
+        return render_template(
+            "login.html", error="Unable to verify the request source. Try again later."
+        ), 400
+    attempt_keys = login_attempt_keys(username, client_address)
     now = int(time.time())
     lock_seconds = get_login_lock_seconds(attempt_keys, now=now)
     if lock_seconds:
+        log_event(
+            logger,
+            "login_throttled",
+            level=logging.WARNING,
+            request_id=getattr(g, "request_id", None),
+            status_code=429,
+            outcome="blocked",
+        )
         return render_template(
             "login.html",
             error="Incorrect username or password. Try again later.",
@@ -40,14 +80,34 @@ def login():
     )
     if user and user["is_active"] and password_matches:
         clear_login_failures(attempt_keys)
-        session.clear()
-        session["user_id"] = user["id"]
-        # The version binds this browser session to the account's current
-        # permissions.  Administrative security changes increment it.
-        session["session_version"] = user["session_version"]
-        session["authenticated_at"] = now
-        session["_csrf_token"] = secrets.token_urlsafe(32)
-        session.permanent = True
+        if user["must_change_password"]:
+            from ..auth.passwords import begin_password_change
+
+            begin_password_change(user, authenticated_at=now)
+            record_audit_event(
+                actor_user_id=user["id"],
+                actor_username=user["username"],
+                action="temporary_password_verified",
+                entity_type="authentication",
+                entity_id=user["id"],
+            )
+            return redirect(url_for("passwords.change_temporary_password"))
+        from ..mfa.routes import begin_mfa_pending
+        from ..mfa.service import requires_mfa
+
+        if requires_mfa(user["role"]):
+            destination = begin_mfa_pending(user, authenticated_at=now)
+            record_audit_event(
+                actor_user_id=user["id"],
+                actor_username=user["username"],
+                action="password_verified_mfa_pending",
+                entity_type="authentication",
+                entity_id=user["id"],
+            )
+            return redirect(url_for(f"mfa.{destination}"))
+        from ..auth.sessions import establish_authenticated_session
+
+        establish_authenticated_session(user, authenticated_at=now)
         record_audit_event(
             actor_user_id=user["id"],
             actor_username=user["username"],
@@ -79,6 +139,14 @@ def login():
             entity_type="authentication",
             entity_id=attempt_keys[0],
         )
+        log_event(
+            logger,
+            "login_throttled",
+            level=logging.WARNING,
+            request_id=getattr(g, "request_id", None),
+            status_code=429,
+            outcome="new_lock",
+        )
     return render_template(
         "login.html",
         error=(
@@ -101,8 +169,7 @@ def login_attempt_keys(username, remote_address):
         f"ip-user:{normalized_address}:{normalized_user}",
     )
     return tuple(
-        hmac.new(secret, value.encode("utf-8"), hashlib.sha256).hexdigest()
-        for value in values
+        hmac.new(secret, value.encode("utf-8"), hashlib.sha256).hexdigest() for value in values
     )
 
 
@@ -117,7 +184,8 @@ def logout():
         entity_type="authentication",
         entity_id=user["id"],
     )
+    from ..auth.sessions import revoke_authenticated_session
+
+    revoke_authenticated_session()
     session.clear()
     return redirect(url_for("auth.login_page"))
-
-

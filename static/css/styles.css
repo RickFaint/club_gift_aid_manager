@@ -1,4 +1,8 @@
 /* Global design tokens and page defaults shared by every Bootstrap template. */
+
+.mfa-container {
+  max-width: 760px;
+}
 :root {
   /* Brand, text, border, and page-surface colors shared across components. */
   --club-ink: #1d2939;

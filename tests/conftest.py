@@ -24,10 +24,11 @@ def isolated_database(tmp_path, monkeypatch):
     changing the result of another test.
     """
     import club_gift_aid_manager.db as db_module
+    from club_gift_aid_manager.migrations import upgrade_database
     from app import app
 
     monkeypatch.setattr(db_module, "DB_PATH", tmp_path / "test.sqlite3")
     # Existing endpoint tests assert the worker's final response directly.
     # Dedicated queue tests override this flag to exercise HTTP 202 polling.
     app.config["IMPORTS_SYNCHRONOUS"] = True
-    db_module.create_app_database()
+    upgrade_database(db_module.DB_PATH)

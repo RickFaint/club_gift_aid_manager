@@ -1,0 +1,11 @@
+{
+  "name": "club-gift-aid-manager-browser-tests",
+  "private": true,
+  "scripts": {
+    "test:browser": "playwright test",
+    "test:browser:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1"
+  }
+}

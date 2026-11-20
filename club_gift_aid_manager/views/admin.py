@@ -1,4 +1,4 @@
-﻿"""Admin routes.
+"""Admin routes.
 
 A Blueprint is Flask's way of collecting related URL handlers.  Defining a
 route here does not start a second application: create_app() later registers
@@ -7,11 +7,44 @@ this collection on the one Flask application object.
 
 from flask import Blueprint
 
-from .shared import *  # noqa: F403 - shared view vocabulary is intentionally centralised
+from .shared import (
+    MAX_IMPORT_ROWS,
+    MAX_PRIVACY_NOTICE_BYTES,
+    Response,
+    Role,
+    audit_change,
+    create_users,
+    csv,
+    csv_import_is_preview,
+    csv_import_writes,
+    create_rate_schedule,
+    get_pagination,
+    get_payload,
+    get_search_query,
+    g,
+    io,
+    jsonify,
+    list_audit_events,
+    list_rate_schedules,
+    list_users,
+    paginated_response,
+    publish_privacy_notice,
+    queue_csv_import,
+    render_template,
+    request,
+    sqlite3,
+)
 from ..auth.decorators import recent_authentication_required, roles_required
+from ..db import prepare_user_import, validate_user_import
+from ..dtos import UserCreateDTO, UserUpdateDTO
+from ..dtos.users import UserImportDTO
+from ..core.validation import parse_dto
+from ..services.workflows import UserAdministrationService, WorkflowNotFoundError
 
 
 blueprint = Blueprint("admin", __name__)
+user_administration_service = UserAdministrationService()
+
 
 @blueprint.post("/admin/privacy-notice")
 @roles_required(Role.ADMIN)
@@ -55,7 +88,9 @@ def privacy_notice_upload():
         return jsonify({"error": "The effective date must use YYYY-MM-DD format."}), 400
 
     audit_change(
-        "published", "privacy_notice_version", version["id"],
+        "published",
+        "privacy_notice_version",
+        version["id"],
         ("effective_date", "published_date", "text_sha256", "notice_text"),
     )
     return jsonify({"updated": True, "notice": notice, "version": version})
@@ -108,10 +143,7 @@ def mileage_rates_create():
     if missing:
         return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
     try:
-        rates = {
-            field: int(payload[field])
-            for field in required[1:]
-        }
+        rates = {field: int(payload[field]) for field in required[1:]}
         if any(str(payload[field]).strip() != str(rates[field]) for field in required[1:]):
             raise ValueError("Rates must be entered as whole pence amounts.")
         schedule = create_rate_schedule(
@@ -137,7 +169,7 @@ def audit_index():
     """Expose the bounded recent audit history to administrators only."""
     limit, offset = get_pagination()
     items, total = list_audit_events(
-        limit=limit, offset=offset, with_total=True
+        limit=limit, offset=offset, with_total=True, search=get_search_query()
     )
     return jsonify(paginated_response(items, total, limit, offset))
 
@@ -147,9 +179,7 @@ def audit_index():
 def users_index():
     """List safe account metadata without returning password hashes."""
     limit, offset = get_pagination()
-    items, total = list_users(
-        limit=limit, offset=offset, with_total=True
-    )
+    items, total = list_users(limit=limit, offset=offset, with_total=True, search=get_search_query())
     return jsonify(paginated_response(items, total, limit, offset))
 
 
@@ -164,19 +194,118 @@ def users_create():
     if missing:
         return jsonify({"error": f"Missing required fields: {', '.join(missing)}"}), 400
     try:
-        person_id = int(payload["person_id"]) if payload.get("person_id") not in (None, "") else None
-        user = create_user(
-            username=str(payload["username"]),
-            password=str(payload["password"]),
-            role=str(payload["role"]),
-            person_id=person_id,
+        normalised = dict(payload)
+        if normalised.get("person_id") in (None, ""):
+            normalised["person_id"] = None
+        dto = parse_dto(UserCreateDTO, normalised)
+        user = user_administration_service.create(
+            dto.model_dump(),
+            actor=g.current_user,
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except sqlite3.IntegrityError:
         return jsonify({"error": "Username is already in use."}), 409
-    audit_change("created", "user", user["id"], ("username", "role", "person_id"))
     return jsonify(user), 201
+
+
+@blueprint.post("/admin/users/import")
+@roles_required(Role.ADMIN)
+@recent_authentication_required()
+def users_import():
+    """Queue a bounded background account import after recent authentication."""
+    return queue_csv_import("users", _users_import_now, recent_auth_required=True)
+
+
+def _users_import_now():
+    """Validate an entire account CSV before atomically creating its accounts."""
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"error": "Select a CSV file to upload."}), 400
+    if not upload.filename.lower().endswith(".csv"):
+        return jsonify({"error": "The uploaded file must have a .csv extension."}), 400
+    try:
+        contents = upload.read().decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(contents, newline=""), strict=True)
+        headers = [header.strip().lower() if header else "" for header in (reader.fieldnames or [])]
+        reader.fieldnames = headers
+    except (UnicodeDecodeError, csv.Error):
+        return jsonify(
+            {"error": "The CSV file could not be read. Use UTF-8 encoding and valid CSV formatting."}
+        ), 400
+
+    required_fields = {"username", "role"}
+    allowed_fields = required_fields | {"password", "person_id"}
+    if not headers or not required_fields.issubset(headers):
+        missing = sorted(required_fields - set(headers))
+        return jsonify({"error": f"Missing required CSV column(s): {', '.join(missing)}."}), 400
+    if len(headers) != len(set(headers)):
+        return jsonify({"error": "The CSV contains duplicate column headings."}), 400
+    unknown_fields = sorted(set(headers) - allowed_fields)
+    if unknown_fields:
+        return jsonify({"error": f"Unknown CSV column(s): {', '.join(unknown_fields)}."}), 400
+
+    users = []
+    errors = []
+    try:
+        for row_number, row in enumerate(reader, start=2):
+            if row_number > MAX_IMPORT_ROWS + 1:
+                raise ValueError(
+                    f"The CSV contains more than {MAX_IMPORT_ROWS} data rows. Split it into smaller files."
+                )
+            if None in row:
+                errors.append(f"Row {row_number} has more values than the CSV headings.")
+                continue
+            if not any(value and value.strip() for value in row.values() if isinstance(value, str)):
+                continue
+            person_value = (row.get("person_id") or "").strip()
+            try:
+                person_id = int(person_value) if person_value else None
+                if person_id is not None and not 0 < person_id < 2**63:
+                    raise ValueError("person_id is outside the supported range.")
+                user = parse_dto(
+                    UserImportDTO,
+                    {
+                        "username": (row.get("username") or "").strip(),
+                        "password": row.get("password"),
+                        "role": (row.get("role") or "").strip().lower(),
+                        "person_id": person_id,
+                    },
+                ).model_dump()
+            except ValueError as exc:
+                errors.append(f"Row {row_number}: {exc}")
+                continue
+            users.append((row_number, user))
+    except (csv.Error, ValueError) as exc:
+        return jsonify({"error": str(exc) or "The CSV file is malformed."}), 400
+
+    errors.extend(validate_user_import(users))
+    if errors:
+        return jsonify({"error": f"{errors[0]} No accounts were imported.", "errors": errors}), 400
+    if not users:
+        return jsonify({"error": "The CSV does not contain any accounts to import."}), 400
+    if csv_import_is_preview():
+        return jsonify({"preview": True, "valid_rows": len(users)})
+    prepared = prepare_user_import([user for _, user in users])
+    try:
+        with csv_import_writes():
+            created = create_users(prepared)
+            for user in created:
+                audit_change("created", "user", user["id"], ("username", "role", "person_id"))
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "An account conflicts with existing data. No accounts were imported."}), 409
+    return jsonify({"imported": len(created), "items": created}), 201
+
+
+@blueprint.get("/admin/users/import/template")
+@roles_required(Role.ADMIN)
+def users_import_template():
+    """Download the CSV header accepted by the account import."""
+    return Response(
+        "username,password,role,person_id\r\n",
+        mimetype="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="accounts-template.csv"'},
+    )
 
 
 @blueprint.patch("/admin/users/<int:user_id>")
@@ -185,31 +314,18 @@ def users_create():
 def users_update(user_id: int):
     """Change account role, person association, or active status and audit it."""
     payload = get_payload()
-    role = payload.get("role")
-    active_value = payload.get("is_active")
-    is_active = None
-    if active_value is not None:
-        is_active = str(active_value).lower() in {"true", "1", "yes"}
+    normalised = dict(payload)
+    if normalised.get("person_id") == "":
+        normalised["person_id"] = None
+    dto = parse_dto(UserUpdateDTO, normalised)
     try:
-        user = update_user(
+        user = user_administration_service.update(
             user_id,
-            role=role,
-            person_id=int(payload["person_id"]) if payload.get("person_id") not in (None, "") else None,
-            is_active=is_active,
+            dto.model_dump(exclude_unset=True),
+            actor=g.current_user,
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    if user is None:
-        return jsonify({"error": "User not found."}), 404
-    changed_fields = [field for field in ("role", "person_id", "is_active") if field in payload]
-    audit_change(
-        "deactivated" if is_active is False
-        else "reactivated" if is_active is True and "is_active" in payload
-        else "updated",
-        "user",
-        user_id,
-        changed_fields,
-    )
+    except WorkflowNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
     return jsonify(user)
-
-

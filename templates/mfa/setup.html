@@ -1,0 +1,17 @@
+{% set page_title = "Set up multi-factor authentication" %}
+{% include "mfa/_shell_start.html" %}
+<p>Administrators and treasurers must use an authenticator app in addition to their password.</p>
+<ol>
+  <li>Install or open an authenticator app on your phone or password manager.</li>
+  <li>Scan the QR code shown in the next step.</li>
+  <li>Enter the six-digit code to confirm setup.</li>
+  <li>Save the recovery codes somewhere private and separate from this device.</li>
+</ol>
+{% if restart_required %}
+<p class="text-muted">For security, start again to generate a new QR code.</p>
+{% endif %}
+<form method="post" action="{{ url_for('mfa.setup_start') }}">
+  <input type="hidden" name="_csrf_token" value="{{ csrf_token }}" />
+  <button class="btn btn-primary" type="submit">Start setup</button>
+</form>
+{% include "mfa/_shell_end.html" %}

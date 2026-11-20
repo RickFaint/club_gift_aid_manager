@@ -1,40 +1,122 @@
 ﻿{% extends "base.html" %}
-{% block title %}User accounts Â· Club Gift Aid Manager{% endblock %}
+{% block title %}User accounts &middot; Club Gift Aid Manager{% endblock %}
 {% block content %}
 {# The accounts page is available only to admins; server-side role checks remain authoritative. #}
 <div class="page-heading">
   <div><h1>User accounts</h1><p>Manage logins and application roles.</p></div>
-  <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#user-modal"><span class="me-1">ï¼‹</span> Create account</button>
+  <div class="d-flex flex-wrap gap-2">
+    <button class="btn btn-outline-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#accounts-import-modal">Upload CSV</button>
+    <button class="btn btn-primary px-3" type="button" data-bs-toggle="modal" data-bs-target="#user-modal"><span class="me-1" aria-hidden="true">+</span> Create account</button>
+  </div>
 </div>
 {# Account listing excludes password hashes and is populated from the admin API. #}
 <div class="card">
   <div class="table-toolbar">
     <div><h2 class="h6 mb-1">Accounts</h2><span class="table-count">Review roles and linked people.</span></div>
-    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">âŒ•</span><input class="form-control" type="search" placeholder="Search accountsâ€¦" aria-label="Search accounts" data-table-search="users-table-body" /></div></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">&#128269;</span><input class="form-control" type="search" placeholder="Search accounts&hellip;" aria-label="Search accounts" data-table-search="users-table-body" /></div></div>
   </div>
   <div class="table-responsive"><table class="table table-hover align-middle">
-    <thead><tr><th>Username</th><th>Role</th><th>Linked person</th><th>Status</th></tr></thead>
+    <thead><tr><th>Username</th><th>Role</th><th>Linked person</th><th>Status</th><th>MFA</th><th>Security action</th></tr></thead>
     <tbody id="users-table-body"></tbody>
   </table></div>
+</div>
+<div class="modal fade" id="accounts-import-modal" tabindex="-1" aria-labelledby="accounts-import-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content">
+    <form id="accounts-import-form" method="post" action="{{ url_for('admin.users_import') }}">
+      <div class="modal-header"><div><h2 class="modal-title fs-5" id="accounts-import-title">Upload accounts</h2><p class="text-muted small mb-0">Create multiple application accounts from a CSV file.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+      <div class="modal-body">
+        <div class="alert alert-info">Leave passwords blank to use activation codes. If you include temporary passwords, keep the CSV private and delete it after import.</div>
+        <label class="form-label" for="accounts-csv-file">CSV file</label>
+        <input id="accounts-csv-file" class="form-control" type="file" name="file" accept=".csv,text/csv" required />
+        <div class="form-text">Required columns: <code>username</code>, <code>role</code>. Optional columns: <code>password</code>, <code>person_id</code>. For volunteers, use the ID shown in the People directory. Leave the person ID blank for administrators.</div>
+        <a class="d-inline-block mt-2" href="{{ url_for('admin.users_import_template') }}">Download CSV template</a>
+        <div data-csv-status role="status" aria-live="polite" hidden></div>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-outline-primary" type="submit" name="preview" disabled>Preview CSV</button><button class="btn btn-primary px-4" type="submit" disabled>Upload accounts</button></div>
+    </form>
+  </div></div>
+</div>
+<div class="modal fade" id="user-edit-modal" tabindex="-1" aria-labelledby="user-edit-title" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+    <form id="user-edit-form" method="post" action="{{ url_for('admin.users_index') }}">
+      <div class="modal-header">
+        <h2 class="modal-title fs-5" id="user-edit-title">Edit account</h2>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="fw-semibold" id="user-edit-name"></p>
+        <label class="form-label" for="user-edit-role-select">Role</label>
+        <select class="form-select mb-3" name="role" id="user-edit-role-select">
+          <option value="volunteer">Volunteer</option><option value="treasurer">Treasurer</option><option value="admin">Admin</option>
+        </select>
+        <div class="mb-3" id="user-edit-person-field">
+          <label class="form-label" for="user-edit-person-select">Linked person</label>
+          <select class="form-select" name="person_id" id="user-edit-person-select"></select>
+        </div>
+        <label class="form-label" for="user-edit-active">Status</label>
+        <select class="form-select" id="user-edit-active" name="is_active"><option value="true">Active</option><option value="false">Inactive</option></select>
+        <div class="form-text">Changing the role, person link, or status signs the user out.</div>
+        <div class="alert alert-danger mt-3 mb-0" id="user-edit-error" role="alert" hidden></div>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" type="submit" disabled>Save changes</button></div>
+    </form>
+  </div></div>
+</div>
+<div class="modal fade" id="user-invitation-modal" tabindex="-1" aria-labelledby="user-invitation-title" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+    <form id="user-invitation-form" method="post" action="{{ url_for('admin.users_index') }}">
+      <div class="modal-header">
+        <h2 class="modal-title fs-5" id="user-invitation-title">Issue activation code</h2>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="fw-semibold" id="user-invitation-name"></p>
+        <p>Verify the recipient before sharing the code. Issuing a code replaces earlier activation codes and temporary passwords.</p>
+        <div id="user-invitation-details" hidden>
+          <label class="form-label" for="user-invitation-code">Activation code</label>
+          <input class="form-control" id="user-invitation-code" readonly autocomplete="off" />
+          <p class="form-text">Share the code securely. The recipient can enter it on the <a id="user-invitation-link">activation page</a> within 48 hours.</p>
+        </div>
+        <div class="alert alert-danger mt-3 mb-0" id="user-invitation-error" role="alert" hidden></div>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Close</button><button class="btn btn-primary" type="submit" disabled>Generate code</button></div>
+    </form>
+  </div></div>
+</div>
+{# Password reset is administrator-assisted and never displays an existing credential. #}
+<div class="modal fade" id="password-reset-modal" tabindex="-1" aria-labelledby="password-reset-title" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+    <form id="password-reset-form" method="post" action="{{ url_for('admin.users_index') }}">
+      <input type="hidden" id="password-reset-user-id" name="user_id" />
+      <div class="modal-header"><div><h2 class="modal-title fs-5" id="password-reset-title">Reset password</h2><p class="text-muted small mb-0">Account: <span id="password-reset-username"></span></p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+      <div class="modal-body">
+        <div class="alert alert-warning">Verify the account holder through the club's approved offline process before continuing.</div>
+        <p class="small text-muted">Use at least 15 characters with uppercase and lowercase letters, a number, and a special character. The user must replace this temporary password at next login.</p>
+        <label class="form-label" for="temporary-password">Temporary password</label><input class="form-control mb-3" id="temporary-password" name="temporary_password" type="password" minlength="15" required autocomplete="new-password" />
+        <label class="form-label" for="confirm-temporary-password">Confirm temporary password</label><input class="form-control" id="confirm-temporary-password" name="confirm_temporary_password" type="password" minlength="15" required autocomplete="new-password" />
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" type="submit" disabled>Set temporary password</button></div>
+    </form>
+  </div></div>
 </div>
 {# Account creation requires a long password and links volunteers to a person. #}
 <div class="modal fade" id="user-modal" tabindex="-1" aria-labelledby="user-modal-title" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content">
-    <form id="user-form">
+    <form id="user-form" method="post" action="{{ url_for('admin.users_create') }}">
       <div class="modal-header"><div><h2 class="modal-title fs-5" id="user-modal-title">Create account</h2><p class="text-muted small mb-0">Create credentials and assign the appropriate access role.</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
       <div class="modal-body"><div class="row g-3">
         <div class="col-md-4"><label class="form-label" for="user-name">Username</label><input id="user-name" class="form-control" name="username" required autocomplete="username" /></div>
-        <div class="col-md-4"><label class="form-label" for="user-password">Temporary password (minimum 12 characters)</label><input id="user-password" class="form-control" type="password" name="password" minlength="12" required autocomplete="new-password" /></div>
+        <div class="col-md-4"><label class="form-label" for="user-password">Temporary password (minimum 15 characters)</label><input id="user-password" class="form-control" type="password" name="password" minlength="15" required autocomplete="new-password" /></div>
         <div class="col-md-4"><label class="form-label" for="user-role-select">Role</label><select class="form-select" name="role" id="user-role-select"><option value="volunteer">Volunteer</option><option value="treasurer">Treasurer</option><option value="admin">Admin</option></select></div>
         <div class="col-md-6" id="user-person-field"><label class="form-label" for="user-person-select">Linked person (required for volunteers; used for treasurer trip entry)</label><select class="form-select" name="person_id" id="user-person-select"></select></div>
       </div></div>
-      <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Create account</button></div>
+      <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit" disabled>Create account</button></div>
     </form>
   </div></div>
 </div>
 {% endblock %}
 {% block page_instructions %}
-<p>Create accounts for people who need access to the application. Assign the least-privileged role that supports their work.</p>
-<ul class="mb-0"><li>Passwords must be at least 12 characters.</li><li>Volunteers must be linked to a person; treasurers may be linked to a person to enter trips for themselves.</li><li>Admins can enter trips for any person. Other roles can only enter trips for their linked person.</li></ul>
+<p>Create accounts individually or import them from CSV. Assign the least-privileged role that supports their work. For an imported account without a temporary password, select Issue code and share the code securely with the account holder.</p>
+<ul class="mb-0"><li>Passwords must be at least 15 characters and include uppercase and lowercase letters, a number, and a special character.</li><li>Administrators and treasurers must enroll an authenticator app at their first login.</li><li>Password and MFA resets require offline identity verification and sign out all target sessions.</li><li>Volunteers must be linked to a person; treasurers may be linked to a person to enter trips for themselves.</li><li>Admins can enter trips for any person. Other roles can only enter trips for their linked person.</li></ul>
 {% endblock %}
 

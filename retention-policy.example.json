@@ -1,0 +1,7 @@
+{
+  "log_directory": "/private/club-gift-aid-logs",
+  "log_retention_days": 90,
+  "backup_directory": "/private/club-gift-aid-backups",
+  "backup_retention_days": 30,
+  "approved_person_ids": []
+}

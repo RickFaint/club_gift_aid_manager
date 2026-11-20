@@ -15,9 +15,13 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from club_gift_aid_manager.crypto import decrypt_value, validate_encryption_config
+from club_gift_aid_manager.security.crypto import decrypt_value, validate_encryption_config
 from club_gift_aid_manager.db import DB_PATH
-from club_gift_aid_manager.storage import ensure_private_directory, ensure_private_file, validate_private_path
+from club_gift_aid_manager.security.storage import (
+    ensure_private_directory,
+    ensure_private_file,
+    validate_private_path,
+)
 
 
 def _signing_key() -> bytes:
@@ -73,13 +77,10 @@ def build_export(database: Path = DB_PATH) -> dict:
 def verify_export(document: dict) -> bool:
     """Return whether the signature and basic event-count metadata are intact."""
     supplied = str(document.get("hmac_sha256", ""))
-    expected = hmac.new(
-        _signing_key(), _canonical_payload(document), hashlib.sha256
-    ).hexdigest()
-    return (
-        hmac.compare_digest(supplied, expected)
-        and document.get("metadata", {}).get("event_count") == len(document.get("events", []))
-    )
+    expected = hmac.new(_signing_key(), _canonical_payload(document), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(supplied, expected) and document.get("metadata", {}).get(
+        "event_count"
+    ) == len(document.get("events", []))
 
 
 def write_export(database: Path, destination: Path) -> Path:
@@ -93,6 +94,7 @@ def write_export(database: Path, destination: Path) -> Path:
 
 
 def main() -> None:
+    """Parse the audit CLI and create or verify a signed export document."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     export_parser = subparsers.add_parser("create")

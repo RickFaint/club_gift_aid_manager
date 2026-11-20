@@ -5,7 +5,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="csrf-token" content="{{ csrf_token }}" />
-    <title>Sign in Â· Club Gift Aid Manager</title>
+    <title>Sign in &middot; Club Gift Aid Manager</title>
     <link href="{{ url_for('static', filename='vendor/bootstrap/5.3.3/bootstrap.min.css') }}" rel="stylesheet" />
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css', v='4') }}" />
   </head>
@@ -27,6 +27,7 @@
           <div class="mb-4"><label class="form-label" for="login-password">Password</label><input id="login-password" class="form-control" type="password" name="password" required autocomplete="current-password" /></div>
           <button class="btn btn-primary w-100 py-2" type="submit">Sign in</button>
         </form>
+        <a class="d-inline-block mt-3" href="{{ url_for('passwords.activate_account') }}">Activate an invited account</a>
         <p class="login-footnote mb-0">Access is limited to authorised club users.</p>
       </div>
     </main>

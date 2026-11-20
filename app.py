@@ -16,7 +16,7 @@ from club_gift_aid_manager.factory import (
     validate_deployment_config,
     validate_production_database_path,
 )
-from club_gift_aid_manager.roles import Role
+from club_gift_aid_manager.domain.roles import Role
 from club_gift_aid_manager.views.shared import HTML_FORM
 from club_gift_aid_manager.views.shared import calculate_route_distance, record_audit_event
 
@@ -32,9 +32,13 @@ if __name__ == "__main__":
 
     if len(sys.argv) > 1 and sys.argv[1] == "create-admin":
         if list_users():
-            raise SystemExit("Administrator accounts already exist; manage accounts as an administrator.")
+            raise SystemExit(
+                "Administrator accounts already exist; manage accounts as an administrator."
+            )
         username = input("Admin username: ").strip()
-        password = getpass("Admin password (12+ characters): ")
+        password = getpass(
+            "Admin password (15+ characters, upper/lowercase, number, special character): "
+        )
         try:
             user = create_user(
                 username=username,

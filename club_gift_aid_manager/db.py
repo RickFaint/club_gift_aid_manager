@@ -1,9 +1,11 @@
-"""SQLite persistence layer for accounts and club mileage/Gift Aid records.
+"""Compatibility persistence facade for mileage and Gift Aid operations.
 
-Each public helper owns a short-lived connection, performs the requested
-database operation, commits writes, and closes the connection in ``finally``.
-Business rules that protect relationships (for example, linking only a person's
-own declaration/payment/trips) are checked here as well as in the HTTP layer.
+SQLAlchemy models and repositories are the canonical object persistence layer.
+This module preserves the established function API while services and routes
+move behind repository interfaces. Runtime domain operations use repository
+sessions; direct SQLite remains only for connection lifecycle, schema upgrades,
+partial indexes, and immutable triggers. Relationship rules remain enforced
+below and in services.
 """
 
 from __future__ import annotations
@@ -15,15 +17,15 @@ import logging
 import os
 import sqlite3
 from contextvars import ContextVar
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
 from werkzeug.security import generate_password_hash
 
-from .crypto import blind_index, decrypt_value, encrypt_value, validate_encryption_config
-from .roles import Role
-from .services import (
+from .security.crypto import blind_index, decrypt_value, encrypt_value, validate_encryption_config
+from .domain.roles import Role
+from .services.calculations import (
     BASE_RATE_BANDS,
     calculate_tax_year,
     calculate_trip_amounts,
@@ -31,10 +33,16 @@ from .services import (
     validate_declaration,
 )
 
-DB_PATH = Path(os.environ.get(
-    "CLUB_GIFT_AID_DB",
-    str(Path(__file__).resolve().parent.parent / "club_gift_aid_manager.sqlite3"),
-))
+DB_PATH = (
+    Path(
+        os.environ.get(
+            "CLUB_GIFT_AID_DB",
+            str(Path(__file__).resolve().parent.parent / "club_gift_aid_manager.sqlite3"),
+        )
+    )
+    .expanduser()
+    .resolve()
+)
 INITIAL_PRIVACY_NOTICE_PATH = Path(__file__).resolve().parent.parent / "privacy-notice.txt"
 
 _WINDOWS_PERMISSION_WARNING_EMITTED = False
@@ -48,6 +56,7 @@ ENCRYPTED_FIELDS: dict[str, tuple[str, ...]] = {
     "donations": ("amount_pence", "method", "reference", "bank_reference", "receipt_id"),
     "payments": ("batch_id", "amount_pence", "method", "reference"),
     "audit_events": ("actor_username",),
+    "route_lookup_cache": ("distance_miles",),
 }
 
 FIELD_CASTS = {
@@ -72,17 +81,26 @@ class _RequestConnection(sqlite3.Connection):
     """Keep helper-level commits and closes inside the surrounding request transaction."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Create a connection whose final commit is controlled by Flask hooks."""
         super().__init__(*args, **kwargs)
         self.defer_commit = False
         self.defer_close = False
+        self.defer_rollback = False
 
     def commit(self) -> None:
+        """Defer normal commits until the request lifecycle declares success."""
         if not self.defer_commit:
             super().commit()
 
     def close(self) -> None:
+        """Keep the request-owned connection open until teardown completes."""
         if not self.defer_close:
             super().close()
+
+    def rollback(self) -> None:
+        """Let Flask, rather than an inner ORM session, own request rollback."""
+        if not self.defer_rollback:
+            super().rollback()
 
 
 def get_connection() -> sqlite3.Connection:
@@ -108,6 +126,11 @@ def get_connection() -> sqlite3.Connection:
         _WINDOWS_PERMISSION_WARNING_EMITTED = True
     conn = sqlite3.connect(DB_PATH, factory=_RequestConnection)
     conn.row_factory = sqlite3.Row
+    # SQLite ignores changes to this setting once a transaction has started.
+    conn.execute("PRAGMA foreign_keys = ON")
+    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        conn.close()
+        raise RuntimeError("SQLite foreign-key enforcement could not be enabled.")
     return conn
 
 
@@ -126,6 +149,7 @@ def begin_request_transaction() -> None:
         raise
     conn.defer_commit = True
     conn.defer_close = True
+    conn.defer_rollback = True
     _REQUEST_CONNECTION.set(conn)
 
 
@@ -137,6 +161,7 @@ def finish_request_transaction(*, commit: bool) -> None:
     _REQUEST_CONNECTION.set(None)
     conn.defer_commit = False
     conn.defer_close = False
+    conn.defer_rollback = False
     try:
         if commit:
             sqlite3.Connection.commit(conn)
@@ -174,6 +199,7 @@ def _decrypt_fields(table: str, row: sqlite3.Row | dict[str, Any] | None) -> dic
 
 
 def _decrypt_alias(row: dict[str, Any], field: str, caster=None) -> None:
+    """Decrypt an aliased query field in place and optionally coerce its type."""
     if field not in row:
         return
     value = decrypt_value(row[field])
@@ -187,6 +213,13 @@ def create_app_database() -> None:
     add newer fields only when absent, preserving existing stored records.
     """
     validate_encryption_config()
+    # SQLAlchemy models are the canonical table definitions.  The idempotent
+    # SQL below remains for data migrations, partial indexes, and SQLite
+    # immutability triggers that are intentionally database-specific.
+    from .database import get_engine
+    from .models import Base
+
+    Base.metadata.create_all(get_engine())
     conn = get_connection()
     try:
         conn.executescript(
@@ -212,6 +245,7 @@ def create_app_database() -> None:
                 person_id INTEGER,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 session_version INTEGER NOT NULL DEFAULT 1,
+                must_change_password INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(person_id) REFERENCES people(id)
             );
@@ -423,21 +457,26 @@ def create_app_database() -> None:
         )
         conn.commit()
         # Inspect the existing schema before adding fields so upgrades are repeatable.
-        trip_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(trips)").fetchall()
-        }
+        trip_columns = {row["name"] for row in conn.execute("PRAGMA table_info(trips)").fetchall()}
         destination_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(destinations)").fetchall()
         }
-        user_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()
-        }
+        user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         # Existing accounts begin at version one.  Changing this value later
         # makes sessions issued with an older version immediately invalid.
         if "session_version" not in user_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1")
+        # Legacy databases predate administrator-assisted password resets. Existing
+        # accounts keep their current passwords until an administrator resets one.
+        if "must_change_password" not in user_columns:
             conn.execute(
-                "ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1"
+                "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"
             )
+        payment_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(payments)").fetchall()
+        }
+        if "calculation_snapshot" not in payment_columns:
+            conn.execute("ALTER TABLE payments ADD COLUMN calculation_snapshot TEXT")
         # New location flags default off so no legacy location is assumed to be home.
         if "home_ground" not in destination_columns:
             conn.execute(
@@ -452,13 +491,12 @@ def create_app_database() -> None:
             row["name"] for row in conn.execute("PRAGMA table_info(donations)").fetchall()
         }
         declaration_columns = {
-            row["name"] for row in conn.execute("PRAGMA table_info(gift_aid_declarations)").fetchall()
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(gift_aid_declarations)").fetchall()
         }
         # Existing gifts remain included in totals when the dormancy feature is introduced.
         if "active" not in donation_columns:
-            conn.execute(
-                "ALTER TABLE donations ADD COLUMN active INTEGER NOT NULL DEFAULT 1"
-            )
+            conn.execute("ALTER TABLE donations ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
         if "active" not in declaration_columns:
             conn.execute(
                 "ALTER TABLE gift_aid_declarations ADD COLUMN active INTEGER NOT NULL DEFAULT 1"
@@ -475,9 +513,7 @@ def create_app_database() -> None:
                 (current_notice["id"],),
             )
         if "privacy_notice_sha256" not in declaration_columns:
-            conn.execute(
-                "ALTER TABLE gift_aid_declarations ADD COLUMN privacy_notice_sha256 TEXT"
-            )
+            conn.execute("ALTER TABLE gift_aid_declarations ADD COLUMN privacy_notice_sha256 TEXT")
             conn.execute(
                 "UPDATE gift_aid_declarations SET privacy_notice_sha256 = ?",
                 (current_notice["text_sha256"],),
@@ -490,9 +526,13 @@ def create_app_database() -> None:
         )
         # Legacy trip records are preserved and receive nullable location links.
         if "destination_id" not in trip_columns:
-            conn.execute("ALTER TABLE trips ADD COLUMN destination_id INTEGER REFERENCES destinations(id)")
+            conn.execute(
+                "ALTER TABLE trips ADD COLUMN destination_id INTEGER REFERENCES destinations(id)"
+            )
         if "origin_id" not in trip_columns:
-            conn.execute("ALTER TABLE trips ADD COLUMN origin_id INTEGER REFERENCES destinations(id)")
+            conn.execute(
+                "ALTER TABLE trips ADD COLUMN origin_id INTEGER REFERENCES destinations(id)"
+            )
         # The partial index permits unflagged rows while preventing two home flags.
         conn.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_destinations_single_home_ground
@@ -513,24 +553,56 @@ def record_audit_event(
     changed_fields: Iterable[str] = (),
 ) -> None:
     """Append a user/action/entity event without storing sensitive field values."""
-    conn = get_connection()
-    try:
-        conn.execute(
-            """INSERT INTO audit_events (
-                   actor_user_id, actor_username, action, entity_type, entity_id, changed_fields
-               ) VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                actor_user_id,
-                encrypt_value(actor_username),
-                action,
-                entity_type,
-                str(entity_id),
-                json.dumps(sorted(set(changed_fields))),
-            ),
+    from .database import unit_of_work
+    from .models import AuditEvent
+    from .repositories import SQLAlchemyAuditRepository
+
+    with unit_of_work() as session:
+        SQLAlchemyAuditRepository(session).add(
+            AuditEvent(
+                actor_user_id=actor_user_id,
+                actor_username=actor_username,
+                action=action,
+                entity_type=entity_type,
+                entity_id=str(entity_id),
+                changed_fields=json.dumps(sorted(set(changed_fields))),
+            )
         )
-        conn.commit()
-    finally:
-        conn.close()
+
+
+def record_audit_events(
+    *,
+    actor_user_id: int | None,
+    actor_username: str,
+    events: Iterable[dict[str, Any]],
+) -> None:
+    """Append many audit events through one database unit of work.
+
+    CSV imports can create hundreds or thousands of records. Opening a new
+    SQLAlchemy session for every audit row is unnecessarily expensive and is
+    especially fragile with SQLite because all those sessions share the import's
+    outer atomic transaction. This bulk form preserves an individual audit row
+    for every imported entity while flushing them through one session.
+    """
+    from .database import unit_of_work
+    from .models import AuditEvent
+    from .repositories import SQLAlchemyAuditRepository
+
+    audit_rows = [
+        AuditEvent(
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
+            action=event["action"],
+            entity_type=event["entity_type"],
+            entity_id=str(event["entity_id"]),
+            changed_fields=json.dumps(sorted(set(event.get("changed_fields", ())))),
+        )
+        for event in events
+    ]
+    if not audit_rows:
+        return
+    with unit_of_work() as session:
+        SQLAlchemyAuditRepository(session).add_all(audit_rows)
 
 
 def get_login_lock_seconds(
@@ -543,21 +615,23 @@ def get_login_lock_seconds(
     keys = tuple(set(attempt_keys))
     if not keys:
         return 0
-    placeholders = ",".join("?" for _ in keys)
-    conn = get_connection()
-    try:
-        conn.execute(
-            "DELETE FROM login_attempts WHERE locked_until <= ? AND window_started_at < ?",
-            (now, now - window_seconds),
+    from sqlalchemy import delete, func, select
+    from .database import unit_of_work
+    from .models import LoginAttempt
+
+    with unit_of_work() as session:
+        session.execute(
+            delete(LoginAttempt).where(
+                LoginAttempt.locked_until <= now,
+                LoginAttempt.window_started_at < now - window_seconds,
+            )
         )
-        row = conn.execute(
-            f"SELECT MAX(locked_until) AS locked_until FROM login_attempts "
-            f"WHERE attempt_key IN ({placeholders})",
-            keys,
-        ).fetchone()
-        return max(0, int(row["locked_until"] or 0) - now)
-    finally:
-        conn.close()
+        locked_until = session.scalar(
+            select(func.max(LoginAttempt.locked_until)).where(
+                LoginAttempt.attempt_key.in_(keys),
+            )
+        )
+        return max(0, int(locked_until or 0) - now)
 
 
 def record_login_failure(
@@ -572,48 +646,49 @@ def record_login_failure(
     keys = tuple(set(attempt_keys))
     if not keys:
         raise ValueError("At least one login attempt key is required.")
-    conn = get_connection()
     newly_locked = False
     longest_lock = 0
-    try:
-        conn.execute(
-            "DELETE FROM login_attempts WHERE window_started_at < ? AND locked_until < ?",
-            (now - window_seconds - lockout_seconds, now),
+    from sqlalchemy import delete
+    from .database import unit_of_work
+    from .models import LoginAttempt
+    from .repositories import SQLAlchemyLoginAttemptRepository
+
+    with unit_of_work() as session:
+        repository = SQLAlchemyLoginAttemptRepository(session)
+        session.execute(
+            delete(LoginAttempt).where(
+                LoginAttempt.window_started_at < now - window_seconds - lockout_seconds,
+                LoginAttempt.locked_until < now,
+            )
         )
         for key in keys:
-            row = conn.execute(
-                "SELECT failure_count, window_started_at, locked_until "
-                "FROM login_attempts WHERE attempt_key = ?",
-                (key,),
-            ).fetchone()
-            if row is None or now - row["window_started_at"] >= window_seconds:
+            row = repository.get(key)
+            if row is None or now - row.window_started_at >= window_seconds:
                 failure_count = 1
                 window_started_at = now
             else:
-                failure_count = row["failure_count"] + 1
-                window_started_at = row["window_started_at"]
-            threshold = (
-                max_failures[key] if isinstance(max_failures, dict) else max_failures
-            )
+                failure_count = row.failure_count + 1
+                window_started_at = row.window_started_at
+            threshold = max_failures[key] if isinstance(max_failures, dict) else max_failures
             locked_until = now + lockout_seconds if failure_count >= threshold else 0
             newly_locked = newly_locked or (
-                locked_until > now and (row is None or row["locked_until"] <= now)
+                locked_until > now and (row is None or row.locked_until <= now)
             )
-            conn.execute(
-                """INSERT INTO login_attempts (
-                       attempt_key, failure_count, window_started_at, locked_until
-                   ) VALUES (?, ?, ?, ?)
-                   ON CONFLICT(attempt_key) DO UPDATE SET
-                       failure_count = excluded.failure_count,
-                       window_started_at = excluded.window_started_at,
-                       locked_until = excluded.locked_until""",
-                (key, failure_count, window_started_at, locked_until),
-            )
+            if row is None:
+                repository.add(
+                    LoginAttempt(
+                        attempt_key=key,
+                        failure_count=failure_count,
+                        window_started_at=window_started_at,
+                        locked_until=locked_until,
+                    )
+                )
+            else:
+                row.failure_count = failure_count
+                row.window_started_at = window_started_at
+                row.locked_until = locked_until
             longest_lock = max(longest_lock, locked_until - now)
-        conn.commit()
         return newly_locked, max(0, longest_lock)
-    finally:
-        conn.close()
 
 
 def clear_login_failures(attempt_keys: Iterable[str]) -> None:
@@ -621,223 +696,498 @@ def clear_login_failures(attempt_keys: Iterable[str]) -> None:
     keys = tuple(set(attempt_keys))
     if not keys:
         return
-    placeholders = ",".join("?" for _ in keys)
-    conn = get_connection()
-    try:
-        conn.execute(
-            f"DELETE FROM login_attempts WHERE attempt_key IN ({placeholders})",
-            keys,
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    from sqlalchemy import delete
+    from .database import unit_of_work
+    from .models import LoginAttempt
+
+    with unit_of_work() as session:
+        session.execute(delete(LoginAttempt).where(LoginAttempt.attempt_key.in_(keys)))
 
 
 def list_audit_events(
-    limit: int = 500, offset: int = 0, *, with_total: bool = False
+    limit: int = 500, offset: int = 0, *, with_total: bool = False, search: str = ""
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """Return newest audit events, bounded to prevent an unbounded page response."""
-    conn = get_connection()
-    try:
-        total = conn.execute("SELECT COUNT(*) AS count FROM audit_events").fetchone()["count"]
-        rows = conn.execute(
-            """SELECT id, actor_user_id, actor_username, action, entity_type,
-                      entity_id, changed_fields, occurred_at
-               FROM audit_events
-               ORDER BY id DESC
-               LIMIT ? OFFSET ?""",
-            (max(1, min(int(limit), 1000)), max(0, int(offset))),
-        ).fetchall()
-        events = [_decrypt_fields("audit_events", row) for row in rows]
-        for event in events:
-            event["changed_fields"] = json.loads(event["changed_fields"])
+    from sqlalchemy import func, select
+    from .database import unit_of_work
+    from .dtos import AuditEventDTO
+    from .models import AuditEvent
+
+    with unit_of_work() as session:
+        total = int(session.scalar(select(func.count()).select_from(AuditEvent)) or 0)
+        statement = select(AuditEvent).order_by(AuditEvent.id.desc())
+        if not search:
+            statement = statement.limit(max(1, min(int(limit), 1000))).offset(max(0, int(offset)))
+        models = session.scalars(statement)
+        events = [AuditEventDTO.model_validate(model).model_dump() for model in models]
+        if search:
+            query = search.casefold()
+            events = [event for event in events if query in json.dumps(event, default=str).casefold()]
+            total = len(events)
+            events = events[offset : offset + max(1, min(int(limit), 1000))]
         return (events, total) if with_total else events
-    finally:
-        conn.close()
 
 
-def create_user(*, username: str, password: str, role: str, person_id: int | None = None) -> dict[str, Any]:
+def _user_model_to_dict(user, *, include_credentials: bool = False) -> dict[str, Any]:
+    """Serialize a User model through the safe response DTO."""
+    from .dtos import UserDTO
+
+    result = UserDTO.model_validate(user).model_dump()
+    result["is_active"] = int(result["is_active"])
+    if include_credentials:
+        # Only the authentication service requests these internal fields.  They
+        # are absent from UserDTO and therefore cannot leak from normal routes.
+        result["username_bidx"] = user.username_bidx
+        result["password_hash"] = user.password_hash
+    return result
+
+
+def create_user(
+    *,
+    username: str,
+    password: str,
+    role: str,
+    person_id: int | None = None,
+    must_change_password: bool = False,
+) -> dict[str, Any]:
     """Validate a login identity, hash its password, and persist the account."""
     if not username.strip():
         raise ValueError("Username is required.")
     if role not in {member.value for member in Role}:
         raise ValueError("Role must be admin, treasurer, or volunteer.")
-    if not 12 <= len(password) <= 1024:
-        raise ValueError("Password must be between 12 and 1024 characters.")
+    from .security.passwords import validate_password
+
+    validate_password(password)
     if role == Role.VOLUNTEER.value and person_id is None:
         raise ValueError("Volunteer accounts must be linked to a person.")
     if role == Role.ADMIN.value and person_id is not None:
         raise ValueError("Administrator accounts cannot be linked to a person.")
-    conn = get_connection()
-    try:
-        if person_id is not None and conn.execute(
-            "SELECT 1 FROM people WHERE id = ?", (person_id,)
-        ).fetchone() is None:
+    from .database import unit_of_work
+    from .models import User
+    from .repositories import SQLAlchemyPersonRepository, SQLAlchemyUserRepository
+
+    with unit_of_work() as session:
+        if person_id is not None and SQLAlchemyPersonRepository(session).get(person_id) is None:
             raise ValueError("Linked person was not found.")
-        cursor = conn.execute(
-            """INSERT INTO users (username, username_bidx, password_hash, role, person_id)
-               VALUES (?, ?, ?, ?, ?)""",
-            (
-                encrypt_value(username.strip()),
-                blind_index(username),
-                generate_password_hash(password),
-                role,
-                person_id,
-            ),
+        user = SQLAlchemyUserRepository(session).add(
+            User(
+                username=username.strip(),
+                username_bidx=blind_index(username),
+                password_hash=generate_password_hash(password),
+                role=role,
+                person_id=person_id,
+                is_active=1,
+                session_version=1,
+                must_change_password=int(must_change_password),
+            )
         )
-        conn.commit()
-        row = conn.execute(
-            """SELECT id, username, role, person_id, is_active, session_version,
-                      created_at FROM users WHERE id = ?""",
-            (cursor.lastrowid,),
-        ).fetchone()
-        return _decrypt_fields("users", row)
-    finally:
-        conn.close()
+        return _user_model_to_dict(user)
+
+
+def validate_user_import(
+    rows: list[tuple[int, dict[str, Any]]],
+) -> list[str]:
+    """Check all account rows and resolve referenced records in batches."""
+    from sqlalchemy import select
+
+    from .database import unit_of_work
+    from .models import Person, User
+    from .security.passwords import validate_password
+
+    indexes = {blind_index(values["username"]) for _, values in rows}
+    person_ids = {values["person_id"] for _, values in rows if values["person_id"] is not None}
+    with unit_of_work() as session:
+        existing_indexes = set(
+            session.scalars(select(User.username_bidx).where(User.username_bidx.in_(indexes)))
+        )
+        existing_people = set(session.scalars(select(Person.id).where(Person.id.in_(person_ids))))
+
+    errors = []
+    seen_indexes = set()
+    for number, values in rows:
+        username = values["username"]
+        role = values["role"]
+        person_id = values["person_id"]
+        username_bidx = blind_index(username)
+        try:
+            if values["password"] is not None:
+                validate_password(values["password"])
+            if role == Role.VOLUNTEER.value and person_id is None:
+                raise ValueError("Volunteer accounts must be linked to a person.")
+            if role == Role.ADMIN.value and person_id is not None:
+                raise ValueError("Administrator accounts cannot be linked to a person.")
+            if person_id is not None and person_id not in existing_people:
+                raise ValueError(f"Linked person {person_id} was not found.")
+            if username_bidx in seen_indexes:
+                raise ValueError("Username appears more than once in the CSV.")
+            if username_bidx in existing_indexes:
+                raise ValueError("Username is already in use.")
+        except ValueError as exc:
+            errors.append(f"Row {number}: {exc}")
+        seen_indexes.add(username_bidx)
+    return errors
+
+
+def prepare_user_import(users: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Hash validated passwords before opening the import write transaction."""
+    from secrets import token_urlsafe
+
+    return [
+        {
+            "username": values["username"],
+            "username_bidx": blind_index(values["username"]),
+            "password_hash": generate_password_hash(values["password"] or token_urlsafe(48)),
+            "role": values["role"],
+            "person_id": values["person_id"],
+            "must_change_password": 1,
+        }
+        for values in users
+    ]
+
+
+def create_users(users: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Persist prepared accounts, with uniqueness and person links enforced by SQLite."""
+    from .database import unit_of_work
+    from .models import User
+    from .repositories import SQLAlchemyUserRepository
+
+    with unit_of_work() as session:
+        created = SQLAlchemyUserRepository(session).add_all(User(**values) for values in users)
+        return [_user_model_to_dict(model) for model in created]
 
 
 def get_user_by_username(username: str) -> dict[str, Any] | None:
     """Find an account case-insensitively; includes its hash for login checking."""
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT * FROM users WHERE username_bidx = ?", (blind_index(username),)
-        ).fetchone()
-        return _decrypt_fields("users", row)
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyUserRepository
+
+    with unit_of_work() as session:
+        user = SQLAlchemyUserRepository(session).by_username_index(blind_index(username))
+        return _user_model_to_dict(user, include_credentials=True) if user else None
 
 
 def get_user_by_id(user_id: int) -> dict[str, Any] | None:
     """Load a session account without exposing its password hash."""
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            """SELECT id, username, role, person_id, is_active, session_version,
-                      created_at FROM users WHERE id = ?""",
-            (user_id,),
-        ).fetchone()
-        return _decrypt_fields("users", row)
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyUserRepository
+
+    with unit_of_work() as session:
+        user = SQLAlchemyUserRepository(session).get(user_id)
+        return _user_model_to_dict(user) if user else None
+
+
+def reset_user_password(user_id: int, temporary_password: str) -> dict[str, Any] | None:
+    """Set a temporary password, require replacement, and invalidate all sessions."""
+    from .security.passwords import validate_password
+
+    validate_password(temporary_password, label="Temporary password")
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyUserRepository
+
+    with unit_of_work() as session:
+        user = SQLAlchemyUserRepository(session).get(user_id)
+        if user is None:
+            return None
+        user.password_hash = generate_password_hash(temporary_password)
+        user.must_change_password = 1
+        user.session_version += 1
+        return _user_model_to_dict(user)
+
+
+def replace_temporary_password(user_id: int, new_password: str) -> dict[str, Any] | None:
+    """Replace a temporary password and clear the mandatory-change state."""
+    from werkzeug.security import check_password_hash
+    from .security.passwords import validate_password
+
+    validate_password(new_password)
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyUserRepository
+
+    with unit_of_work() as session:
+        user = SQLAlchemyUserRepository(session).get(user_id)
+        if user is None:
+            return None
+        if not user.must_change_password:
+            raise ValueError("This account does not require a password change.")
+        if check_password_hash(user.password_hash, new_password):
+            raise ValueError("Choose a password different from the temporary password.")
+        user.password_hash = generate_password_hash(new_password)
+        user.must_change_password = 0
+        user.session_version += 1
+        return _user_model_to_dict(user)
+
+
+def _matches_list_search(query: str, *values: Any) -> bool:
+    """Check case-insensitive search without storing plaintext indexes."""
+    return any(query in str(value).casefold() for value in values if value is not None)
 
 
 def list_users(
-    *, limit: int | None = None, offset: int = 0, with_total: bool = False
+    *, limit: int | None = None, offset: int = 0, with_total: bool = False, search: str = ""
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List account metadata for the admin account-management view."""
-    conn = get_connection()
-    try:
-        total = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
-        rows = conn.execute(
-            """SELECT id, username, role, person_id, is_active, session_version, created_at
-               FROM users"""
-        ).fetchall()
-        users = sorted(
-            (_decrypt_fields("users", row) for row in rows),
-            key=lambda user: user["username"].casefold(),
-        )
-        if limit is not None:
-            users = users[offset : offset + limit]
+    from sqlalchemy import func, select
+
+    from .database import unit_of_work
+    from .models import Person, User, UserMFA
+
+    with unit_of_work() as session:
+        statement = select(
+            User.id,
+            User.username,
+            User.role,
+            User.person_id,
+            User.is_active,
+            User.must_change_password,
+            UserMFA.enabled_at,
+        ).outerjoin(UserMFA, UserMFA.user_id == User.id)
+
+        def serialize(row) -> dict[str, Any]:
+            """Convert one projected account row into the stable public API shape.
+
+            Keeping this conversion beside the deliberately narrow query makes it
+            clear which authentication fields may leave the persistence layer.
+            """
+            return {
+                "id": row.id,
+                "username": row.username,
+                "role": row.role,
+                "person_id": row.person_id,
+                "is_active": int(bool(row.is_active)),
+                "must_change_password": bool(row.must_change_password),
+                "mfa_enabled": bool(row.enabled_at),
+            }
+
+        query = search.casefold()
+        if query:
+            searchable = session.execute(
+                select(User.id, User.username, User.role, User.is_active, Person.name).outerjoin(
+                    Person, User.person_id == Person.id
+                )
+            )
+            names = [
+                (user_id, name)
+                for user_id, name, role, active, person_name in searchable
+                if _matches_list_search(
+                    query, name, role, "active" if active else "inactive", person_name
+                )
+            ]
+            ids = [
+                record[0]
+                for record in sorted(names, key=lambda item: (item[1].casefold(), item[0]))
+            ]
+            total = len(ids)
+            if limit is not None:
+                ids = ids[offset : offset + limit]
+            if not ids:
+                return ([], total) if with_total else []
+            records = {
+                row.id: serialize(row) for row in session.execute(statement.where(User.id.in_(ids)))
+            }
+            users = [records[user_id] for user_id in ids if user_id in records]
+        else:
+            total = (
+                int(session.scalar(select(func.count()).select_from(User)) or 0)
+                if with_total
+                else 0
+            )
+            statement = statement.order_by(User.id)
+            if limit is not None:
+                statement = statement.limit(limit).offset(offset)
+            users = [serialize(row) for row in session.execute(statement)]
         return (users, total) if with_total else users
-    finally:
-        conn.close()
+
+
+_UNSET_PERSON_LINK = object()
 
 
 def update_user(
     user_id: int,
     *,
     role: str | None = None,
-    person_id: int | None = None,
+    person_id: int | None | object = _UNSET_PERSON_LINK,
     is_active: bool | None = None,
 ) -> dict[str, Any] | None:
     """Change role/link/activation while protecting the last active administrator."""
-    user = get_user_by_id(user_id)
-    if user is None:
-        return None
-    next_role = role or user["role"]
-    next_person_id = person_id if person_id is not None else user["person_id"]
-    if next_role == Role.ADMIN.value:
-        next_person_id = None
-    if next_role not in {member.value for member in Role}:
-        raise ValueError("Role must be admin, treasurer, or volunteer.")
-    if next_role == Role.VOLUNTEER.value and next_person_id is None:
-        raise ValueError("Cannot assign volunteer role without a linked person.")
-    assignments = ["role = ?", "person_id = ?"]
-    values: list[Any] = [next_role, next_person_id]
-    if is_active is not None:
-        assignments.append("is_active = ?")
-        values.append(int(is_active))
-    # A role change or explicit deactivation revokes every session created
-    # with the previous version.  Other profile edits leave sessions valid.
-    if next_role != user["role"] or is_active is False:
-        assignments.append("session_version = session_version + 1")
-    values.append(user_id)
-    conn = get_connection()
-    try:
-        if next_person_id is not None and conn.execute(
-            "SELECT 1 FROM people WHERE id = ?", (next_person_id,)
-        ).fetchone() is None:
-            raise ValueError("Linked person was not found.")
-        if user["role"] == Role.ADMIN.value and (
-            next_role != Role.ADMIN.value or is_active is False
+    from sqlalchemy import func, select
+    from .database import unit_of_work
+    from .models import User
+    from .repositories import SQLAlchemyPersonRepository, SQLAlchemyUserRepository
+
+    with unit_of_work() as session:
+        user = SQLAlchemyUserRepository(session).get(user_id)
+        if user is None:
+            return None
+        next_role = role or user.role
+        next_person_id = user.person_id if person_id is _UNSET_PERSON_LINK else person_id
+        if next_role == Role.ADMIN.value:
+            next_person_id = None
+        if next_role not in {member.value for member in Role}:
+            raise ValueError("Role must be admin, treasurer, or volunteer.")
+        if next_role == Role.VOLUNTEER.value and next_person_id is None:
+            raise ValueError("Cannot assign volunteer role without a linked person.")
+        if (
+            next_person_id is not None
+            and SQLAlchemyPersonRepository(session).get(next_person_id) is None
         ):
-            # Never allow an operation to remove the final active administrator.
-            active_admins = conn.execute(
-                "SELECT COUNT(*) AS count FROM users WHERE role = ? AND is_active = 1",
-                (Role.ADMIN.value,),
-            ).fetchone()["count"]
-            if active_admins <= 1:
+            raise ValueError("Linked person was not found.")
+        if (
+            user.is_active
+            and user.role == Role.ADMIN.value
+            and (next_role != Role.ADMIN.value or is_active is False)
+        ):
+            active_admins = session.scalar(
+                select(func.count())
+                .select_from(User)
+                .where(
+                    User.role == Role.ADMIN.value,
+                    User.is_active == 1,
+                )
+            )
+            if int(active_admins or 0) <= 1:
                 raise ValueError("Cannot demote or deactivate the last active administrator.")
-        conn.execute(f"UPDATE users SET {', '.join(assignments)} WHERE id = ?", values)
-        conn.commit()
-    finally:
-        conn.close()
-    return get_user_by_id(user_id)
+        if (
+            next_role != user.role
+            or next_person_id != user.person_id
+            or (is_active is not None and bool(user.is_active) != is_active)
+        ):
+            user.session_version += 1
+        user.role = next_role
+        user.person_id = next_person_id
+        if is_active is not None:
+            user.is_active = int(is_active)
+        session.flush()
+        return _user_model_to_dict(user)
 
 
-def create_person(*, name: str, email: str | None = None, phone: str | None = None, role: str = Role.VOLUNTEER.value, active: bool = True, notes: str | None = None) -> dict[str, Any]:
-    """Insert a contact and return the persisted record."""
-    conn = get_connection()
-    try:
-        values = _encrypt_fields("people", {
-            "name": name, "email": email, "phone": phone, "notes": notes,
-        })
-        cursor = conn.execute(
-            "INSERT INTO people (name, email, phone, role, active, notes) VALUES (?, ?, ?, ?, ?, ?)",
-            (values["name"], values["email"], values["phone"], role, int(active), values["notes"]),
+def _person_model_to_dict(person) -> dict[str, Any]:
+    """Serialize a Person model without leaking SQLAlchemy implementation state."""
+    from .dtos import PersonDTO
+
+    # DTO validation is the only model-to-public boundary.  Convert the Boolean
+    # back to the historic integer representation used by existing API clients.
+    result = PersonDTO.model_validate(person).model_dump()
+    result["active"] = int(result["active"])
+    return result
+
+
+def create_person(
+    *,
+    name: str,
+    email: str | None = None,
+    phone: str | None = None,
+    role: str = Role.VOLUNTEER.value,
+    active: bool = True,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Insert a contact through its repository and return its public mapping."""
+    from .database import unit_of_work
+    from .models import Person
+    from .repositories import SQLAlchemyPersonRepository
+
+    with unit_of_work() as session:
+        person = SQLAlchemyPersonRepository(session).add(
+            Person(
+                name=name,
+                email=email,
+                phone=phone,
+                role=role,
+                active=int(active),
+                notes=notes,
+            )
         )
-        conn.commit()
-        row = conn.execute("SELECT * FROM people WHERE id = ?", (cursor.lastrowid,)).fetchone()
-        return _decrypt_fields("people", row)
-    finally:
-        conn.close()
+        return _person_model_to_dict(person)
+
+
+def create_people(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Create an already validated batch of people atomically."""
+    from .database import unit_of_work
+    from .models import Person
+    from .repositories import SQLAlchemyPersonRepository
+
+    with unit_of_work() as session:
+        models = [
+            Person(
+                name=person["name"],
+                email=person.get("email"),
+                phone=person.get("phone"),
+                role=person.get("role", Role.VOLUNTEER.value),
+                active=int(person.get("active", True)),
+                notes=person.get("notes"),
+            )
+            for person in people
+        ]
+        created = SQLAlchemyPersonRepository(session).add_all(models)
+        return [_person_model_to_dict(model) for model in created]
 
 
 def list_people(
-    *, limit: int | None = None, offset: int = 0, with_total: bool = False
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    with_total: bool = False,
+    search: str = "",
+    person_id: int | None = None,
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """Return all contacts for staff and the selector controls."""
-    conn = get_connection()
-    try:
-        total = conn.execute("SELECT COUNT(*) AS count FROM people").fetchone()["count"]
-        suffix = " LIMIT ? OFFSET ?" if limit is not None else ""
-        params = (limit, offset) if limit is not None else ()
-        rows = conn.execute("SELECT * FROM people ORDER BY id ASC" + suffix, params).fetchall()
-        people = [_decrypt_fields("people", row) for row in rows]
+    from sqlalchemy import func, select
+
+    from .database import unit_of_work
+    from .models import Person
+
+    with unit_of_work() as session:
+        filters = () if person_id is None else (Person.id == person_id,)
+        statement = select(Person).where(*filters).order_by(Person.id)
+        if search:
+            query = search.casefold()
+            searchable = session.execute(
+                select(
+                    Person.id, Person.name, Person.email, Person.phone, Person.role, Person.active
+                )
+                .where(*filters)
+                .order_by(Person.id)
+            )
+            ids = [
+                values[0]
+                for values in searchable
+                if _matches_list_search(query, *values[:-1], "active" if values[-1] else "inactive")
+            ]
+            total = len(ids)
+            if limit is not None:
+                ids = ids[offset : offset + limit]
+            statement = statement.where(Person.id.in_(ids))
+        else:
+            total = int(
+                session.scalar(select(func.count()).select_from(Person).where(*filters)) or 0
+            )
+            if limit is not None:
+                statement = statement.limit(limit).offset(offset)
+        people = [_person_model_to_dict(person) for person in session.scalars(statement)]
         return (people, total) if with_total else people
-    finally:
-        conn.close()
+
+
+def list_person_choices(person_id: int | None = None) -> list[dict[str, Any]]:
+    """Return only person labels and identifiers for linking and displaying records."""
+    from sqlalchemy import select
+
+    from .database import unit_of_work
+    from .models import Person
+
+    with unit_of_work() as session:
+        statement = select(Person.id, Person.name, Person.active).order_by(Person.id)
+        if person_id is not None:
+            statement = statement.where(Person.id == person_id)
+        return [dict(row) for row in session.execute(statement).mappings()]
 
 
 def get_person(person_id: int) -> dict[str, Any] | None:
     """Look up one person by primary key."""
-    conn = get_connection()
-    try:
-        row = conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
-        return _decrypt_fields("people", row)
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyPersonRepository
+
+    with unit_of_work() as session:
+        person = SQLAlchemyPersonRepository(session).get(person_id)
+        return _person_model_to_dict(person) if person is not None else None
 
 
 def update_person(person_id: int, **updates: Any) -> dict[str, Any] | None:
@@ -850,49 +1200,80 @@ def update_person(person_id: int, **updates: Any) -> dict[str, Any] | None:
     if not updates_to_apply:
         return get_person(person_id)
 
-    assignments = ", ".join(f"{key} = ?" for key in updates_to_apply)
-    encrypted_updates = _encrypt_fields("people", updates_to_apply)
-    values = [encrypted_updates[key] for key in updates_to_apply]
-    conn = get_connection()
-    try:
-        conn.execute(f"UPDATE people SET {assignments} WHERE id = ?", (*values, person_id))
-        conn.commit()
-        row = conn.execute("SELECT * FROM people WHERE id = ?", (person_id,)).fetchone()
-        return _decrypt_fields("people", row)
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyPersonRepository
+
+    with unit_of_work() as session:
+        person = SQLAlchemyPersonRepository(session).get(person_id)
+        if person is None:
+            return None
+        for field, value in updates_to_apply.items():
+            setattr(person, field, int(value) if field == "active" else value)
+        session.flush()
+        return _person_model_to_dict(person)
 
 
 def anonymize_person(person_id: int) -> bool:
     """Remove direct identifiers while preserving linked trip and financial history."""
-    conn = get_connection()
-    try:
-        person = conn.execute(
-            "SELECT id FROM people WHERE id = ?", (person_id,)
-        ).fetchone()
+    from sqlalchemy import select
+    from .database import unit_of_work
+    from .models import GiftAidDeclaration, User
+    from .repositories import SQLAlchemyPersonRepository
+
+    with unit_of_work() as session:
+        person = SQLAlchemyPersonRepository(session).get(person_id)
         if person is None:
             return False
-        conn.execute(
-            """UPDATE people
-               SET name = ?, email = NULL, phone = NULL, notes = NULL,
-                   active = 0, role = 'other'
-               WHERE id = ?""",
-            (encrypt_value(f"Deleted person {person_id}"), person_id),
-        )
-        conn.execute(
-            """UPDATE gift_aid_declarations
-               SET full_name = ?, home_address = NULL, postcode = NULL, evidence_ref = NULL
-               WHERE person_id = ?""",
-            (encrypt_value(f"Deleted person {person_id}"), person_id),
-        )
-        conn.execute(
-            "UPDATE users SET is_active = 0, person_id = NULL WHERE person_id = ?",
-            (person_id,),
-        )
-        conn.commit()
+        replacement = f"Deleted person {person_id}"
+        person.name = replacement
+        person.email = person.phone = person.notes = None
+        person.active = 0
+        person.role = "other"
+        for declaration in session.scalars(
+            select(GiftAidDeclaration).where(GiftAidDeclaration.person_id == person_id)
+        ):
+            declaration.full_name = replacement
+            declaration.home_address = declaration.postcode = declaration.evidence_ref = None
+        for user in session.scalars(select(User).where(User.person_id == person_id)):
+            user.is_active = 0
+            user.person_id = None
+            user.session_version += 1
+        session.flush()
         return True
-    finally:
-        conn.close()
+
+
+def delete_or_deactivate_person(person_id: int) -> str | None:
+    """Delete an unused person or make a referenced person dormant.
+
+    Financial, trip, declaration, and account relationships must retain their
+    person key for audit integrity. A completely unused directory entry has no
+    such history and can safely be removed instead of anonymised.
+    """
+    from sqlalchemy import func, select
+    from .database import unit_of_work
+    from .models import Donation, GiftAidDeclaration, Payment, Person, Trip, User
+
+    with unit_of_work() as session:
+        person = session.get(Person, person_id)
+        if person is None:
+            return None
+        related = any(
+            session.scalar(select(func.count()).select_from(model).where(field == person_id))
+            for model, field in (
+                (Trip, Trip.person_id),
+                (GiftAidDeclaration, GiftAidDeclaration.person_id),
+                (Donation, Donation.person_id),
+                (Payment, Payment.person_id),
+                (User, User.person_id),
+            )
+        )
+        if related:
+            person.active = 0
+            session.flush()
+            return "dormant"
+        session.delete(person)
+        session.flush()
+        return "deleted"
 
 
 def _privacy_notice_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -908,107 +1289,130 @@ def _privacy_notice_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def get_current_privacy_notice() -> dict[str, Any]:
     """Return the most recently published immutable privacy notice version."""
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT * FROM privacy_notice_versions ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        notice = _privacy_notice_to_dict(row)
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyPrivacyNoticeRepository
+
+    with unit_of_work() as session:
+        model = SQLAlchemyPrivacyNoticeRepository(session).current()
+        notice = _privacy_notice_model_to_dict(model) if model else None
         if notice is None:
             raise RuntimeError("No privacy notice version has been published.")
         return notice
-    finally:
-        conn.close()
 
 
 def get_privacy_notice_version(version_id: int) -> dict[str, Any] | None:
     """Return one historical notice version by its stable identifier."""
-    conn = get_connection()
-    try:
-        return _privacy_notice_to_dict(conn.execute(
-            "SELECT * FROM privacy_notice_versions WHERE id = ?", (version_id,)
-        ).fetchone())
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyPrivacyNoticeRepository
+
+    with unit_of_work() as session:
+        model = SQLAlchemyPrivacyNoticeRepository(session).get(version_id)
+        return _privacy_notice_model_to_dict(model) if model else None
 
 
-def publish_privacy_notice(notice_text: str, *, effective_date: str | None = None) -> dict[str, Any]:
+def publish_privacy_notice(
+    notice_text: str, *, effective_date: str | None = None
+) -> dict[str, Any]:
     """Append a new notice version; database triggers prohibit later edits or deletion."""
     effective = date.fromisoformat(effective_date) if effective_date else date.today()
     digest = hashlib.sha256(notice_text.encode("utf-8")).hexdigest()
-    conn = get_connection()
-    try:
-        cursor = conn.execute(
-            """INSERT INTO privacy_notice_versions
-                   (effective_date, published_date, text_sha256, notice_text)
-               VALUES (?, ?, ?, ?)""",
-            (effective.isoformat(), date.today().isoformat(), digest, notice_text),
+    from .database import unit_of_work
+    from .models import PrivacyNoticeVersion
+    from .repositories import SQLAlchemyPrivacyNoticeRepository
+
+    with unit_of_work() as session:
+        model = SQLAlchemyPrivacyNoticeRepository(session).add(
+            PrivacyNoticeVersion(
+                effective_date=effective.isoformat(),
+                published_date=date.today().isoformat(),
+                text_sha256=digest,
+                notice_text=notice_text,
+            )
         )
-        conn.commit()
-        return _privacy_notice_to_dict(conn.execute(
-            "SELECT * FROM privacy_notice_versions WHERE id = ?", (cursor.lastrowid,)
-        ).fetchone())
-    finally:
-        conn.close()
+        return _privacy_notice_model_to_dict(model)
 
 
-def create_declaration(*, person_id: int, full_name: str, home_address: str | None = None, postcode: str | None = None, declaration_date: str | None = None, scope: str = "future", withdrawn_date: str | None = None, evidence_ref: str | None = None, privacy_notice_version_id: int | None = None) -> dict[str, Any]:
+def _privacy_notice_model_to_dict(model) -> dict[str, Any]:
+    """Verify and serialize an immutable privacy-notice model."""
+    from .dtos import PrivacyNoticeVersionDTO
+
+    notice = PrivacyNoticeVersionDTO.model_validate(model).model_dump()
+    actual_hash = hashlib.sha256(notice["notice_text"].encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(actual_hash, notice["text_sha256"]):
+        raise RuntimeError("Stored privacy notice text does not match its recorded SHA-256.")
+    return notice
+
+
+def create_declaration(
+    *,
+    person_id: int,
+    full_name: str,
+    home_address: str | None = None,
+    postcode: str | None = None,
+    declaration_date: str | None = None,
+    scope: str = "future",
+    withdrawn_date: str | None = None,
+    evidence_ref: str | None = None,
+    evidence_image_base64: str | None = None,
+    evidence_image_mime: str | None = None,
+    privacy_notice_version_id: int | None = None,
+) -> dict[str, Any]:
     """Store Gift Aid declaration details for the selected donor."""
-    conn = get_connection()
-    try:
-        if privacy_notice_version_id is None:
-            notice_row = conn.execute(
-                "SELECT id, text_sha256 FROM privacy_notice_versions ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-        else:
-            notice_row = conn.execute(
-                "SELECT id, text_sha256 FROM privacy_notice_versions WHERE id = ?",
-                (privacy_notice_version_id,),
-            ).fetchone()
-        if notice_row is None:
-            raise ValueError("A valid privacy notice version is required.")
-        values = _encrypt_fields("gift_aid_declarations", {
-            "full_name": full_name, "home_address": home_address, "postcode": postcode,
-            "scope": scope, "evidence_ref": evidence_ref,
-        })
-        cursor = conn.execute(
-            """
-            INSERT INTO gift_aid_declarations (
-                person_id, full_name, home_address, postcode, declaration_date,
-                scope, withdrawn_date, evidence_ref, privacy_notice_version_id,
-                privacy_notice_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                person_id, values["full_name"], values["home_address"], values["postcode"],
-                declaration_date, values["scope"], withdrawn_date, values["evidence_ref"],
-                notice_row["id"], notice_row["text_sha256"],
-            ),
+    from .database import unit_of_work
+    from .models import GiftAidDeclaration
+    from .repositories import SQLAlchemyDeclarationRepository, SQLAlchemyPrivacyNoticeRepository
+
+    with unit_of_work() as session:
+        notices = SQLAlchemyPrivacyNoticeRepository(session)
+        notice = (
+            notices.current()
+            if privacy_notice_version_id is None
+            else notices.get(privacy_notice_version_id)
         )
-        conn.commit()
-        row = conn.execute("SELECT * FROM gift_aid_declarations WHERE id = ?", (cursor.lastrowid,)).fetchone()
-        return _decrypt_fields("gift_aid_declarations", row)
-    finally:
-        conn.close()
+        if notice is None:
+            raise ValueError("A valid privacy notice version is required.")
+        model = SQLAlchemyDeclarationRepository(session).add(
+            GiftAidDeclaration(
+                person_id=person_id,
+                full_name=full_name,
+                home_address=home_address,
+                postcode=postcode,
+                declaration_date=declaration_date,
+                scope=scope,
+                withdrawn_date=withdrawn_date,
+                evidence_ref=evidence_ref,
+                evidence_image_base64=evidence_image_base64,
+                evidence_image_mime=evidence_image_mime,
+                privacy_notice_version_id=notice.id,
+                privacy_notice_sha256=notice.text_sha256,
+                active=1,
+            )
+        )
+        return _declaration_model_to_dict(model)
 
 
 def get_declaration(declaration_id: int) -> dict[str, Any] | None:
     """Fetch one declaration, including logically deleted records."""
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            "SELECT * FROM gift_aid_declarations WHERE id = ?", (declaration_id,)
-        ).fetchone()
-        return _decrypt_fields("gift_aid_declarations", row)
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyDeclarationRepository
+
+    with unit_of_work() as session:
+        model = SQLAlchemyDeclarationRepository(session).get(declaration_id)
+        return _declaration_model_to_dict(model) if model else None
 
 
 def update_declaration(declaration_id: int, **fields: Any) -> dict[str, Any] | None:
     """Update declaration details and its logical-active flag."""
     allowed_fields = {
-        "person_id", "full_name", "home_address", "postcode", "declaration_date",
-        "scope", "withdrawn_date", "evidence_ref", "active",
+        "person_id",
+        "full_name",
+        "home_address",
+        "postcode",
+        "declaration_date",
+        "scope",
+        "withdrawn_date",
+        "evidence_ref",
+        "active",
     }
     updates = {key: value for key, value in fields.items() if key in allowed_fields}
     if "full_name" in updates and not str(updates["full_name"] or "").strip():
@@ -1021,64 +1425,91 @@ def update_declaration(declaration_id: int, **fields: Any) -> dict[str, Any] | N
     if "active" in updates:
         updates["active"] = int(bool(updates["active"]))
 
-    conn = get_connection()
-    try:
-        if not conn.execute(
-            "SELECT 1 FROM gift_aid_declarations WHERE id = ?", (declaration_id,)
-        ).fetchone():
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyDeclarationRepository
+
+    with unit_of_work() as session:
+        model = SQLAlchemyDeclarationRepository(session).get(declaration_id)
+        if model is None:
             return None
-        if updates:
-            encrypted_updates = _encrypt_fields("gift_aid_declarations", updates)
-            assignments = ", ".join(f"{key} = ?" for key in updates)
-            conn.execute(
-                f"UPDATE gift_aid_declarations SET {assignments} WHERE id = ?",
-                (*(encrypted_updates[key] for key in updates), declaration_id),
+        if (
+            "person_id" in updates
+            and updates["person_id"] != model.person_id
+            and model.donations
+        ):
+            raise ValueError(
+                "A declaration linked to donations cannot be reassigned to another person."
             )
-            conn.commit()
-        row = conn.execute(
-            "SELECT * FROM gift_aid_declarations WHERE id = ?", (declaration_id,)
-        ).fetchone()
-        return _decrypt_fields("gift_aid_declarations", row)
-    finally:
-        conn.close()
+        for field, value in updates.items():
+            setattr(model, field, value)
+        session.flush()
+        return _declaration_model_to_dict(model)
 
 
 def deactivate_declaration(declaration_id: int) -> bool:
     """Logically delete a declaration without removing evidence or donation links."""
-    conn = get_connection()
-    try:
-        cursor = conn.execute(
-            "UPDATE gift_aid_declarations SET active = 0 WHERE id = ?",
-            (declaration_id,),
-        )
-        conn.commit()
-        return cursor.rowcount > 0
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyDeclarationRepository
+
+    with unit_of_work() as session:
+        model = SQLAlchemyDeclarationRepository(session).get(declaration_id)
+        if model is None:
+            return False
+        model.active = 0
+        session.flush()
+        return True
 
 
 def list_declarations(
-    person_id: int | None = None, *, limit: int | None = None, offset: int = 0,
+    person_id: int | None = None,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
     with_total: bool = False,
+    search: str = "",
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List declarations, optionally scoped to one person."""
-    conn = get_connection()
-    try:
-        where = "" if person_id is None else " WHERE person_id = ?"
-        params: tuple[Any, ...] = () if person_id is None else (person_id,)
-        total = conn.execute(
-            "SELECT COUNT(*) AS count FROM gift_aid_declarations" + where, params
-        ).fetchone()["count"]
-        page = " LIMIT ? OFFSET ?" if limit is not None else ""
-        page_params = params + ((limit, offset) if limit is not None else ())
-        rows = conn.execute(
-            "SELECT * FROM gift_aid_declarations" + where + " ORDER BY id ASC" + page,
-            page_params,
-        ).fetchall()
-        declarations = [_decrypt_fields("gift_aid_declarations", row) for row in rows]
+    from sqlalchemy import func, select
+    from .database import unit_of_work
+    from .models import GiftAidDeclaration
+
+    with unit_of_work() as session:
+        filters = () if person_id is None else (GiftAidDeclaration.person_id == person_id,)
+        total = int(
+            session.scalar(select(func.count()).select_from(GiftAidDeclaration).where(*filters))
+            or 0
+        )
+        statement = select(GiftAidDeclaration).where(*filters).order_by(GiftAidDeclaration.id)
+        if limit is not None and not search:
+            statement = statement.limit(limit).offset(offset)
+        declarations = [_declaration_model_to_dict(model) for model in session.scalars(statement)]
+        if search:
+            query = search.casefold()
+            declarations = [item for item in declarations if query in json.dumps(item, default=str).casefold()]
+            total = len(declarations)
+            if limit is not None:
+                declarations = declarations[offset : offset + limit]
         return (declarations, total) if with_total else declarations
-    finally:
-        conn.close()
+
+
+def _declaration_model_to_dict(model) -> dict[str, Any]:
+    """Serialize a declaration model through its response DTO."""
+    from .dtos import DeclarationDTO
+
+    result = DeclarationDTO.model_validate(model).model_dump()
+    result["has_evidence_image"] = bool(model.evidence_image_base64)
+    result["active"] = int(bool(result["active"]))
+    return result
+
+
+def _destination_model_to_dict(model) -> dict[str, Any]:
+    """Serialize a destination model through its public response DTO."""
+    from .dtos import DestinationDTO
+
+    result = DestinationDTO.model_validate(model).model_dump()
+    result["active"] = int(result["active"])
+    result["home_ground"] = int(result["home_ground"])
+    return result
 
 
 def create_destination(
@@ -1094,132 +1525,311 @@ def create_destination(
     cleaned_name = name.strip()
     if not cleaned_name:
         raise ValueError("Destination name is required.")
-    conn = get_connection()
-    try:
+    from sqlalchemy import update
+    from .database import unit_of_work
+    from .models import Destination
+    from .repositories import SQLAlchemyDestinationRepository
+
+    with unit_of_work() as session:
         if home_ground:
-            conn.execute("UPDATE destinations SET home_ground = 0 WHERE home_ground = 1")
-        values = _encrypt_fields("destinations", {
-            "name": cleaned_name, "address": address, "town_city": town_city,
-            "postcode": postcode, "notes": notes,
-        })
-        cursor = conn.execute(
-            """INSERT INTO destinations
-                   (name, name_bidx, address, town_city, postcode, notes, home_ground)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (values["name"], blind_index(cleaned_name), values["address"],
-             values["town_city"], values["postcode"], values["notes"], int(home_ground)),
+            session.execute(
+                update(Destination).where(Destination.home_ground == 1).values(home_ground=0)
+            )
+        model = SQLAlchemyDestinationRepository(session).add(
+            Destination(
+                name=cleaned_name,
+                name_bidx=blind_index(cleaned_name),
+                address=address,
+                town_city=town_city,
+                postcode=postcode,
+                notes=notes,
+                active=1,
+                home_ground=int(home_ground),
+            )
         )
-        conn.commit()
-        return _decrypt_fields("destinations", conn.execute(
-            "SELECT * FROM destinations WHERE id = ?", (cursor.lastrowid,)
-        ).fetchone())
-    finally:
-        conn.close()
+        return _destination_model_to_dict(model)
+
+
+def destination_import_conflicts(locations: list[dict[str, Any]]) -> dict[int, str]:
+    """Resolve name conflicts by blind index without loading full location records."""
+    from sqlalchemy import select
+    from .database import unit_of_work
+    from .models import Destination
+
+    indexes = [blind_index(location["name"]) for location in locations]
+    with unit_of_work() as session:
+        existing = dict(
+            session.execute(
+                select(Destination.name_bidx, Destination.name).where(
+                    Destination.name_bidx.in_(set(indexes))
+                )
+            ).all()
+        )
+    conflicts = {}
+    seen = set()
+    for index, name_index in enumerate(indexes):
+        if name_index in existing:
+            conflicts[index] = existing[name_index]
+        elif name_index in seen:
+            conflicts[index] = locations[index]["name"]
+        seen.add(name_index)
+    return conflicts
 
 
 def create_destinations(locations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Create a validated set of locations atomically."""
-    conn = get_connection()
-    request_scoped = _REQUEST_CONNECTION.get() is conn
-    try:
-        if not request_scoped:
-            conn.execute("BEGIN IMMEDIATE")
-        existing_conflicts = []
-        seen_names = set()
-        ascii_lower = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
-        for location in locations:
-            name = location["name"]
-            existing = conn.execute(
-                "SELECT name FROM destinations WHERE name_bidx = ?",
-                (blind_index(name),),
-            ).fetchone()
-            name_key = name.translate(ascii_lower)
-            if existing:
-                conflict_name = decrypt_value(existing["name"])
-            elif name_key in seen_names:
-                conflict_name = name
-            else:
-                seen_names.add(name_key)
-                continue
-            if conflict_name not in existing_conflicts:
-                existing_conflicts.append(conflict_name)
-        if existing_conflicts:
-            conflicts = "; ".join(f'"{name}"' for name in existing_conflicts)
-            raise ValueError(f"Location name conflict(s): {conflicts}.")
+    from sqlalchemy import update
+    from .database import unit_of_work
+    from .models import Destination
+    from .repositories import SQLAlchemyDestinationRepository
 
+    existing_conflicts = destination_import_conflicts(locations)
+    if existing_conflicts:
+        conflicts = "; ".join(f'"{name}"' for name in dict.fromkeys(existing_conflicts.values()))
+        raise ValueError(f"Location name conflict(s): {conflicts}.")
+
+    with unit_of_work() as session:
         if any(location.get("home_ground") for location in locations):
-            conn.execute("UPDATE destinations SET home_ground = 0 WHERE home_ground = 1")
-        created = []
-        for location in locations:
-            values = _encrypt_fields("destinations", location)
-            cursor = conn.execute(
-                """INSERT INTO destinations
-                       (name, name_bidx, address, town_city, postcode, notes, home_ground)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    values["name"],
-                    blind_index(location["name"]),
-                    values.get("address"),
-                    values.get("town_city"),
-                    values.get("postcode"),
-                    values.get("notes"),
-                    int(bool(location.get("home_ground"))),
-                ),
+            session.execute(
+                update(Destination).where(Destination.home_ground == 1).values(home_ground=0)
             )
-            created.append(_decrypt_fields("destinations", conn.execute(
-                "SELECT * FROM destinations WHERE id = ?", (cursor.lastrowid,)
-            ).fetchone()))
-        conn.commit()
-        return created
-    finally:
-        conn.close()
+        models = []
+        for location in locations:
+            models.append(
+                Destination(
+                    name=location["name"],
+                    name_bidx=blind_index(location["name"]),
+                    address=location.get("address"),
+                    town_city=location.get("town_city"),
+                    postcode=location.get("postcode"),
+                    notes=location.get("notes"),
+                    active=1,
+                    home_ground=int(bool(location.get("home_ground"))),
+                )
+            )
+        created = SQLAlchemyDestinationRepository(session).add_all(models)
+        return [_destination_model_to_dict(model) for model in created]
 
 
 def list_destinations(
-    *, active_only: bool = False, limit: int | None = None, offset: int = 0,
+    *,
+    active_only: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
     with_total: bool = False,
+    search: str = "",
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List locations; volunteers receive active locations only for trip choices."""
-    conn = get_connection()
-    try:
-        where = " WHERE active = 1" if active_only else ""
-        total = conn.execute(
-            "SELECT COUNT(*) AS count FROM destinations" + where
-        ).fetchone()["count"]
-        rows = conn.execute("SELECT * FROM destinations" + where).fetchall()
-        destinations = [_decrypt_fields("destinations", row) for row in rows]
-        destinations.sort(key=lambda destination: destination["name"].casefold())
-        if limit is not None:
-            destinations = destinations[offset : offset + limit]
+    from sqlalchemy import func, select
+    from .database import unit_of_work
+    from .models import Destination
+
+    with unit_of_work() as session:
+        filters = (Destination.active == 1,) if active_only else ()
+        statement = select(
+            Destination.id,
+            Destination.name,
+            Destination.address,
+            Destination.town_city,
+            Destination.postcode,
+            Destination.notes,
+            Destination.home_ground,
+            Destination.active,
+        ).where(*filters)
+
+        def serialize(row) -> dict[str, Any]:
+            """Convert one location projection into the representation used by clients.
+
+            The query excludes internal ORM state and this adapter normalizes Boolean
+            flags to the integer form retained for backward API compatibility.
+            """
+            return {
+                "name": row.name,
+                "address": row.address,
+                "town_city": row.town_city,
+                "postcode": row.postcode,
+                "notes": row.notes,
+                "home_ground": int(bool(row.home_ground)),
+                "id": row.id,
+                "active": int(bool(row.active)),
+            }
+
+        query = search.casefold()
+        if query:
+            rows = session.execute(
+                select(
+                    Destination.id,
+                    Destination.name,
+                    Destination.address,
+                    Destination.town_city,
+                    Destination.postcode,
+                    Destination.active,
+                    Destination.home_ground,
+                ).where(*filters)
+            )
+            names = [
+                (row.id, row.name)
+                for row in rows
+                if _matches_list_search(
+                    query,
+                    row.name,
+                    row.address,
+                    row.town_city,
+                    row.postcode,
+                    "active" if row.active else "inactive",
+                    "home" if row.home_ground else "",
+                )
+            ]
+            ids = [
+                record[0]
+                for record in sorted(names, key=lambda item: (item[1].casefold(), item[0]))
+            ]
+            total = len(ids)
+            if limit is not None:
+                ids = ids[offset : offset + limit]
+            if not ids:
+                return ([], total) if with_total else []
+            records = {
+                row.id: serialize(row)
+                for row in session.execute(statement.where(Destination.id.in_(ids)))
+            }
+            destinations = [records[location_id] for location_id in ids if location_id in records]
+        else:
+            total = (
+                int(
+                    session.scalar(select(func.count()).select_from(Destination).where(*filters))
+                    or 0
+                )
+                if with_total
+                else 0
+            )
+            statement = statement.order_by(Destination.id)
+            if limit is not None:
+                statement = statement.limit(limit).offset(offset)
+            destinations = [serialize(row) for row in session.execute(statement)]
         return (destinations, total) if with_total else destinations
-    finally:
-        conn.close()
+
+
+def list_destination_choices() -> list[dict[str, Any]]:
+    """Return active location labels plus the home-ground flag for trip selectors."""
+    from sqlalchemy import select
+
+    from .database import unit_of_work
+    from .models import Destination
+
+    with unit_of_work() as session:
+        rows = session.execute(
+            select(
+                Destination.id,
+                Destination.name,
+                Destination.town_city,
+                Destination.postcode,
+                Destination.active,
+                Destination.home_ground,
+            ).where(Destination.active == 1)
+        ).mappings()
+        return sorted(
+            (dict(row) for row in rows), key=lambda row: (row["name"].casefold(), row["id"])
+        )
 
 
 def get_destination(destination_id: int) -> dict[str, Any] | None:
     """Retrieve a location, including cached coordinates used by routing."""
-    conn = get_connection()
-    try:
-        return _decrypt_fields("destinations", conn.execute(
-            "SELECT * FROM destinations WHERE id = ?", (destination_id,)
-        ).fetchone())
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyDestinationRepository
+
+    with unit_of_work() as session:
+        model = SQLAlchemyDestinationRepository(session).get(destination_id)
+        return _destination_model_to_dict(model) if model else None
 
 
-def save_destination_coordinates(
-    destination_id: int, latitude: float, longitude: float
-) -> None:
-    """Persist geocoded coordinates so later route requests can skip geocoding."""
-    conn = get_connection()
-    try:
-        conn.execute(
-            "UPDATE destinations SET latitude = ?, longitude = ? WHERE id = ?",
-            (encrypt_value(latitude), encrypt_value(longitude), destination_id),
+def _route_location_fingerprint(destination: dict[str, Any]) -> str:
+    """Fingerprint only fields whose changes can alter geocoding or routing."""
+    values = [
+        destination.get(field)
+        for field in (
+            "id", "active", "name", "address", "town_city", "postcode", "latitude", "longitude"
         )
-        conn.commit()
-    finally:
-        conn.close()
+    ]
+    return hashlib.sha256(json.dumps(values, default=str).encode("utf-8")).hexdigest()
+
+
+def get_cached_route_miles(
+    origin_id: int, destination_id: int, *, now: int | None = None
+) -> float | None:
+    """Read a completed route shared by imports, invalidating stale location data."""
+    from .database import unit_of_work
+    from .models import Destination, RouteLookupCache
+
+    current_time = int(datetime.now().timestamp()) if now is None else int(now)
+    key = f"{origin_id}:{destination_id}"
+    with unit_of_work() as session:
+        cached = session.get(RouteLookupCache, key)
+        if cached is None:
+            return None
+        origin = session.get(Destination, origin_id)
+        destination = session.get(Destination, destination_id)
+        if origin is None or destination is None or cached.expires_at <= current_time:
+            session.delete(cached)
+            return None
+        if (
+            cached.origin_fingerprint
+            != _route_location_fingerprint(_destination_model_to_dict(origin))
+            or cached.destination_fingerprint
+            != _route_location_fingerprint(_destination_model_to_dict(destination))
+        ):
+            session.delete(cached)
+            return None
+        return float(cached.distance_miles)
+
+
+def save_cached_route_miles(
+    origin_id: int,
+    destination_id: int,
+    distance_miles: float,
+    *,
+    now: int | None = None,
+    ttl_seconds: int = 3600,
+) -> None:
+    """Upsert a successful route result for reuse by later imports and processes."""
+    from .database import unit_of_work
+    from .models import Destination, RouteLookupCache
+
+    current_time = int(datetime.now().timestamp()) if now is None else int(now)
+    key = f"{origin_id}:{destination_id}"
+    with unit_of_work() as session:
+        origin = session.get(Destination, origin_id)
+        destination = session.get(Destination, destination_id)
+        if origin is None or destination is None:
+            return
+        values = {
+            "origin_id": origin_id,
+            "destination_id": destination_id,
+            "origin_fingerprint": _route_location_fingerprint(_destination_model_to_dict(origin)),
+            "destination_fingerprint": _route_location_fingerprint(
+                _destination_model_to_dict(destination)
+            ),
+            "distance_miles": str(distance_miles),
+            "expires_at": current_time + ttl_seconds,
+        }
+        cached = session.get(RouteLookupCache, key)
+        if cached is None:
+            session.add(RouteLookupCache(key=key, **values))
+        else:
+            for field, value in values.items():
+                setattr(cached, field, value)
+
+
+def save_destination_coordinates(destination_id: int, latitude: float, longitude: float) -> None:
+    """Persist geocoded coordinates so later route requests can skip geocoding."""
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyDestinationRepository
+
+    with unit_of_work() as session:
+        model = SQLAlchemyDestinationRepository(session).get(destination_id)
+        if model:
+            model.latitude, model.longitude = str(latitude), str(longitude)
+            session.flush()
 
 
 def update_destination(destination_id: int, **updates: Any) -> dict[str, Any] | None:
@@ -1241,56 +1851,99 @@ def update_destination(destination_id: int, **updates: Any) -> dict[str, Any] | 
         raise ValueError("An inactive location cannot be the club home ground.")
     if not updates_to_apply:
         return get_destination(destination_id)
-    assignments = ", ".join(f"{key} = ?" for key in updates_to_apply)
-    encrypted_updates = _encrypt_fields("destinations", updates_to_apply)
-    values = [encrypted_updates[key] for key in updates_to_apply]
-    conn = get_connection()
-    try:
-        current = conn.execute(
-            "SELECT active FROM destinations WHERE id = ?", (destination_id,)
-        ).fetchone()
-        if current is None:
+    from sqlalchemy import update
+    from .database import unit_of_work
+    from .models import Destination
+    from .repositories import SQLAlchemyDestinationRepository
+
+    with unit_of_work() as session:
+        repository = SQLAlchemyDestinationRepository(session)
+        model = repository.get(destination_id)
+        if model is None:
             return None
-        if updates_to_apply.get("home_ground") and not updates_to_apply.get("active", current["active"]):
+        effective_active = updates_to_apply.get("active", model.active)
+        if updates_to_apply.get("home_ground") and not effective_active:
             raise ValueError("An inactive location cannot be the club home ground.")
         if updates_to_apply.get("home_ground"):
-            # Clear the prior flag before setting this location's flag.
-            conn.execute("UPDATE destinations SET home_ground = 0 WHERE home_ground = 1")
-        if "name" in updates_to_apply:
-            assignments += ", name_bidx = ?"
-            values.append(blind_index(updates_to_apply["name"]))
-        conn.execute(
-            f"UPDATE destinations SET {assignments} WHERE id = ?",
-            (*values, destination_id),
-        )
-        if {"name", "address", "town_city", "postcode"} & updates_to_apply.keys():
-            # A changed query address invalidates any old geocoded point.
-            conn.execute(
-                "UPDATE destinations SET latitude = NULL, longitude = NULL WHERE id = ?",
-                (destination_id,),
+            session.execute(
+                update(Destination).where(Destination.home_ground == 1).values(home_ground=0)
             )
-        conn.commit()
-        return _decrypt_fields("destinations", conn.execute(
-            "SELECT * FROM destinations WHERE id = ?", (destination_id,)
-        ).fetchone())
-    finally:
-        conn.close()
+        for field, value in updates_to_apply.items():
+            setattr(model, field, value)
+        if "name" in updates_to_apply:
+            model.name_bidx = blind_index(updates_to_apply["name"])
+        if {"name", "address", "town_city", "postcode"} & updates_to_apply.keys():
+            model.latitude = model.longitude = None
+        session.flush()
+        return _destination_model_to_dict(model)
 
 
 def delete_destination(destination_id: int) -> bool:
     """Delete an unused location; historical trip references require deactivation."""
-    conn = get_connection()
-    try:
-        if conn.execute(
-            "SELECT 1 FROM trips WHERE destination_id = ? OR origin_id = ? LIMIT 1",
-            (destination_id, destination_id),
-        ).fetchone():
+    from sqlalchemy import or_, select
+    from .database import unit_of_work
+    from .models import Trip
+    from .repositories import SQLAlchemyDestinationRepository
+
+    with unit_of_work() as session:
+        repository = SQLAlchemyDestinationRepository(session)
+        model = repository.get(destination_id)
+        if model is None:
+            return False
+        if (
+            session.scalar(
+                select(Trip.id)
+                .where(
+                    or_(
+                        Trip.destination_id == destination_id,
+                        Trip.origin_id == destination_id,
+                    )
+                )
+                .limit(1)
+            )
+            is not None
+        ):
             raise ValueError("Location is used by trip records; deactivate it instead.")
-        cursor = conn.execute("DELETE FROM destinations WHERE id = ?", (destination_id,))
-        conn.commit()
-        return cursor.rowcount > 0
-    finally:
-        conn.close()
+        repository.delete(model)
+        return True
+
+
+def get_trip_import_people(person_ids: set[int]) -> set[int]:
+    """Check person references in bounded batches without decrypting contact details."""
+    from sqlalchemy import select
+
+    from .database import unit_of_work
+    from .models import Person
+
+    ids = sorted(person_ids)
+    with unit_of_work() as session:
+        return {
+            person_id
+            for start in range(0, len(ids), 500)
+            for person_id in session.scalars(
+                select(Person.id).where(Person.id.in_(ids[start : start + 500]))
+            )
+        }
+
+
+def get_trip_import_locations(location_ids: set[int]) -> set[int]:
+    """Check which referenced locations are active without reading encrypted fields."""
+    from sqlalchemy import select
+
+    from .database import unit_of_work
+    from .models import Destination
+
+    ids = sorted(location_ids)
+    with unit_of_work() as session:
+        return {
+            location_id
+            for start in range(0, len(ids), 500)
+            for location_id in session.scalars(
+                select(Destination.id).where(
+                    Destination.id.in_(ids[start : start + 500]), Destination.active == 1
+                )
+            )
+        }
 
 
 def create_trip(
@@ -1307,22 +1960,26 @@ def create_trip(
     declaration_text: str | None = None,
     tax_year: str | None = None,
     status: str = "submitted",
+    request_token: str | None = None,
 ) -> dict[str, Any]:
     """Validate and insert a trip, computing its round-trip mileage and tax year."""
     return create_trips(
-        [{
-            "person_id": person_id,
-            "origin_id": origin_id,
-            "destination_id": destination_id,
-            "vehicle_type": vehicle_type,
-            "trip_date": trip_date,
-            "miles_one_way": miles_one_way,
-            "return_trip": return_trip,
-            "passengers": passengers,
-            "declaration_accepted": declaration_accepted,
-            "tax_year": tax_year,
-            "status": status,
-        }],
+        [
+            {
+                "person_id": person_id,
+                "origin_id": origin_id,
+                "destination_id": destination_id,
+                "vehicle_type": vehicle_type,
+                "trip_date": trip_date,
+                "miles_one_way": miles_one_way,
+                "return_trip": return_trip,
+                "passengers": passengers,
+                "declaration_accepted": declaration_accepted,
+                "tax_year": tax_year,
+                "status": status,
+                "request_token": request_token,
+            }
+        ],
         declaration_text=declaration_text,
     )[0]
 
@@ -1341,226 +1998,323 @@ def create_trips(
         validate_declaration(trip.get("declaration_accepted", True), declaration_text)
         miles_one_way = float(trip["miles_one_way"])
         return_trip = bool(trip.get("return_trip", False))
-        prepared.append({
-            "person_id": int(trip["person_id"]),
-            "origin_id": trip.get("origin_id"),
-            "destination_id": trip.get("destination_id"),
-            "vehicle_type": trip["vehicle_type"],
-            "trip_date": trip_date,
-            "tax_year": trip.get("tax_year") or calculate_tax_year(trip_date),
-            "miles_one_way": miles_one_way,
-            "return_trip": return_trip,
-            "total_miles": miles_one_way * (2 if return_trip else 1),
-            "passengers": int(trip.get("passengers", 0)),
-            "declaration_accepted": bool(trip.get("declaration_accepted", True)),
-            "status": trip.get("status", "submitted"),
-        })
+        prepared.append(
+            {
+                "person_id": int(trip["person_id"]),
+                "origin_id": trip.get("origin_id"),
+                "destination_id": trip.get("destination_id"),
+                "vehicle_type": trip["vehicle_type"],
+                "trip_date": trip_date,
+                "tax_year": trip.get("tax_year") or calculate_tax_year(trip_date),
+                "miles_one_way": miles_one_way,
+                "return_trip": return_trip,
+                "total_miles": miles_one_way * (2 if return_trip else 1),
+                "passengers": int(trip.get("passengers", 0)),
+                "declaration_accepted": bool(trip.get("declaration_accepted", True)),
+                "status": trip.get("status", "submitted"),
+                "request_token": trip.get("request_token"),
+            }
+        )
 
-    conn = get_connection()
-    try:
-        created = []
-        for trip in prepared:
-            if trip["destination_id"] is not None and conn.execute(
-                "SELECT 1 FROM destinations WHERE id = ? AND active = 1",
-                (trip["destination_id"],),
-            ).fetchone() is None:
-                raise ValueError("Destination was not found or is inactive.")
-            if trip["origin_id"] is not None and conn.execute(
-                "SELECT 1 FROM destinations WHERE id = ? AND active = 1",
-                (trip["origin_id"],),
-            ).fetchone() is None:
-                raise ValueError("Origin location was not found or is inactive.")
-            cursor = conn.execute(
-                """
-                INSERT INTO trips (
-                    person_id, origin_id, destination_id, vehicle_type, trip_date, tax_year,
-                    miles_one_way, return_trip, total_miles, passengers,
-                    declaration_accepted, declaration_text, declared_at, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
-                """,
-                (
-                    trip["person_id"],
-                    trip["origin_id"],
-                    trip["destination_id"],
-                    encrypt_value(trip["vehicle_type"]),
-                    trip["trip_date"].isoformat(),
-                    trip["tax_year"],
-                    encrypt_value(trip["miles_one_way"]),
-                    int(trip["return_trip"]),
-                    encrypt_value(trip["total_miles"]),
-                    encrypt_value(trip["passengers"]),
-                    int(trip["declaration_accepted"]),
-                    encrypt_value(declaration_text or "I declare that I have taken other parents' children on this journey."),
-                    trip["status"],
-                ),
+    from sqlalchemy import select
+    from .database import unit_of_work
+    from .models import Trip
+    from .repositories import SQLAlchemyDestinationRepository, SQLAlchemyTripRepository
+
+    with unit_of_work() as session:
+        if len(prepared) == 1 and prepared[0].get("request_token"):
+            existing = session.scalar(
+                select(Trip).where(Trip.request_token == prepared[0]["request_token"])
             )
-            created.append(_decrypt_fields("trips",
-                conn.execute("SELECT * FROM trips WHERE id = ?", (cursor.lastrowid,)).fetchone()
-            ))
-        conn.commit()
-        return created
-    finally:
-        conn.close()
+            if existing is not None:
+                return [_trip_model_to_dict(existing)]
+        destinations = SQLAlchemyDestinationRepository(session)
+        models = []
+        for trip in prepared:
+            destination = (
+                destinations.get(trip["destination_id"]) if trip["destination_id"] else None
+            )
+            if trip["destination_id"] is not None and (
+                destination is None or not destination.active
+            ):
+                raise ValueError("Destination was not found or is inactive.")
+            origin = destinations.get(trip["origin_id"]) if trip["origin_id"] else None
+            if trip["origin_id"] is not None and (origin is None or not origin.active):
+                raise ValueError("Origin location was not found or is inactive.")
+            models.append(
+                Trip(
+                    person_id=trip["person_id"],
+                    origin_id=trip["origin_id"],
+                    destination_id=trip["destination_id"],
+                    vehicle_type=trip["vehicle_type"],
+                    trip_date=trip["trip_date"].isoformat(),
+                    tax_year=trip["tax_year"],
+                    miles_one_way=str(trip["miles_one_way"]),
+                    return_trip=int(trip["return_trip"]),
+                    total_miles=str(trip["total_miles"]),
+                    passengers=str(trip["passengers"]),
+                    declaration_accepted=int(trip["declaration_accepted"]),
+                    declaration_text=declaration_text
+                    or "I declare that I have taken other parents' children on this journey.",
+                    declared_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    status=trip["status"],
+                    request_token=trip.get("request_token"),
+                )
+            )
+        created = SQLAlchemyTripRepository(session).add_all(models)
+        return [_trip_model_to_dict(model) for model in created]
+
+
+def _trip_model_to_dict(model) -> dict[str, Any]:
+    """Serialize a trip model and its loaded location/payment relationships."""
+    from .dtos import TripDTO
+
+    result = TripDTO.model_validate(model).model_dump()
+    result["return_trip"] = int(result["return_trip"])
+    result["declaration_accepted"] = int(result["declaration_accepted"])
+    result["destination_name"] = model.destination.name if model.destination else None
+    result["origin_name"] = model.origin.name if model.origin else None
+    result["payment_id"] = model.payment_links[0].payment_id if model.payment_links else None
+    return result
 
 
 def list_trips(
-    person_id: int | None = None, *, limit: int | None = None, offset: int = 0,
+    person_id: int | None = None,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
     with_total: bool = False,
+    unpaid_only: bool = False,
+    search: str = "",
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List trip records with readable endpoints and any linked reimbursement ID."""
-    conn = get_connection()
-    try:
-        query = """SELECT trips.*, destinations.name AS destination_name,
-                          origins.name AS origin_name,
-                          payment_trips.payment_id AS payment_id
-                   FROM trips
-                   LEFT JOIN destinations ON destinations.id = trips.destination_id
-                   LEFT JOIN destinations AS origins ON origins.id = trips.origin_id
-                   LEFT JOIN payment_trips ON payment_trips.trip_id = trips.id"""
-        where = "" if person_id is None else " WHERE trips.person_id = ?"
-        params: tuple[Any, ...] = () if person_id is None else (person_id,)
-        total = conn.execute(
-            "SELECT COUNT(*) AS count FROM trips" +
-            ("" if person_id is None else " WHERE person_id = ?"),
-            params,
-        ).fetchone()["count"]
-        page = " LIMIT ? OFFSET ?" if limit is not None else ""
-        rows = conn.execute(
-            query + where + " ORDER BY trip_date DESC" + page,
-            params + ((limit, offset) if limit is not None else ()),
-        ).fetchall()
-        trips = []
-        for row in rows:
-            trip = _decrypt_fields("trips", row)
-            _decrypt_alias(trip, "destination_name")
-            _decrypt_alias(trip, "origin_name")
-            trips.append(trip)
+    from sqlalchemy import func, select
+    from sqlalchemy.orm import selectinload
+    from .database import unit_of_work
+    from .models import Trip
+
+    with unit_of_work() as session:
+        filters = [] if person_id is None else [Trip.person_id == person_id]
+        if unpaid_only:
+            filters.append(~Trip.payment_links.any())
+        total = int(session.scalar(select(func.count()).select_from(Trip).where(*filters)) or 0)
+        statement = (
+            select(Trip)
+            .where(*filters)
+            .options(
+                selectinload(Trip.origin),
+                selectinload(Trip.destination),
+                selectinload(Trip.payment_links),
+            )
+            .order_by(Trip.trip_date.desc())
+        )
+        if limit is not None and not search:
+            statement = statement.limit(limit).offset(offset)
+        trips = [_trip_model_to_dict(model) for model in session.scalars(statement)]
+        if search:
+            query = search.casefold()
+            trips = [item for item in trips if query in json.dumps(item, default=str).casefold()]
+            total = len(trips)
+            if limit is not None:
+                trips = trips[offset : offset + limit]
         return (trips, total) if with_total else trips
-    finally:
-        conn.close()
 
 
 def get_trip(trip_id: int) -> dict[str, Any] | None:
     """Fetch one trip with location names and its linked payment, if any."""
-    conn = get_connection()
-    try:
-        row = conn.execute(
-            """SELECT trips.*, destinations.name AS destination_name,
-                      origins.name AS origin_name,
-                      payment_trips.payment_id AS payment_id
-               FROM trips
-               LEFT JOIN destinations ON destinations.id = trips.destination_id
-               LEFT JOIN destinations AS origins ON origins.id = trips.origin_id
-               LEFT JOIN payment_trips ON payment_trips.trip_id = trips.id
-               WHERE trips.id = ?""",
-            (trip_id,),
-        ).fetchone()
-        trip = _decrypt_fields("trips", row)
-        if trip is not None:
-            _decrypt_alias(trip, "destination_name")
-            _decrypt_alias(trip, "origin_name")
-        return trip
-    finally:
-        conn.close()
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    from .database import unit_of_work
+    from .models import Trip
+
+    with unit_of_work() as session:
+        model = session.scalar(
+            select(Trip)
+            .where(Trip.id == trip_id)
+            .options(
+                selectinload(Trip.origin),
+                selectinload(Trip.destination),
+                selectinload(Trip.payment_links),
+            )
+        )
+        return _trip_model_to_dict(model) if model else None
 
 
 def update_trip(trip_id: int, **updates: Any) -> dict[str, Any] | None:
-    """Update recognized fields while preserving person ownership of paid trips."""
+    """Update an unpaid trip and derive any dependent values from its inputs."""
     if not updates:
         return get_trip(trip_id)
 
-    allowed = {"person_id", "origin_id", "destination_id", "vehicle_type", "trip_date", "tax_year", "miles_one_way", "return_trip", "total_miles", "passengers", "declaration_accepted", "declaration_text", "declared_at", "status"}
+    allowed = {
+        "person_id",
+        "origin_id",
+        "destination_id",
+        "vehicle_type",
+        "trip_date",
+        "miles_one_way",
+        "return_trip",
+        "passengers",
+        "status",
+    }
     updates_to_apply = {key: value for key, value in updates.items() if key in allowed}
     if "person_id" in updates_to_apply:
         updates_to_apply["person_id"] = int(updates_to_apply["person_id"])
     if not updates_to_apply:
         return get_trip(trip_id)
 
-    assignments = ", ".join(f"{key} = ?" for key in updates_to_apply)
-    encrypted_updates = _encrypt_fields("trips", updates_to_apply)
-    values = [encrypted_updates[key] for key in updates_to_apply]
-    conn = get_connection()
-    try:
-        if "person_id" in updates_to_apply:
-            payment = conn.execute(
-                """SELECT payments.person_id
-                   FROM payment_trips
-                   JOIN payments ON payments.id = payment_trips.payment_id
-                   WHERE payment_trips.trip_id = ?""",
-                (trip_id,),
-            ).fetchone()
-            if payment is not None and payment["person_id"] != updates_to_apply["person_id"]:
-                raise ValueError("A trip linked to a payment cannot be reassigned to another person.")
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyDestinationRepository, SQLAlchemyTripRepository
+
+    with unit_of_work() as session:
+        model = SQLAlchemyTripRepository(session).get(trip_id)
+        if model is None:
+            return None
+        if model.payment_links:
+            raise ValueError("A paid trip is locked. Record a correction note instead.")
+        destinations = SQLAlchemyDestinationRepository(session)
         for field in ("origin_id", "destination_id"):
             location_id = updates_to_apply.get(field)
-            if location_id is not None and conn.execute(
-                "SELECT 1 FROM destinations WHERE id = ? AND active = 1",
-                (location_id,),
-            ).fetchone() is None:
-                raise ValueError(f"{field.replace('_', ' ').capitalize()} was not found or is inactive.")
-        conn.execute(f"UPDATE trips SET {assignments} WHERE id = ?", (*values, trip_id))
-        conn.commit()
-        row = conn.execute("SELECT * FROM trips WHERE id = ?", (trip_id,)).fetchone()
-        return _decrypt_fields("trips", row)
-    finally:
-        conn.close()
+            location = destinations.get(location_id) if location_id is not None else None
+            if location_id is not None and (location is None or not location.active):
+                raise ValueError(
+                    f"{field.replace('_', ' ').capitalize()} was not found or is inactive."
+                )
+        for field, value in updates_to_apply.items():
+            if field == "trip_date" and isinstance(value, date):
+                value = value.isoformat()
+            setattr(model, field, str(value) if field in ENCRYPTED_FIELDS["trips"] else value)
+        if "trip_date" in updates_to_apply:
+            model.tax_year = calculate_tax_year(date.fromisoformat(model.trip_date))
+        if {"miles_one_way", "return_trip"} & updates_to_apply.keys():
+            model.total_miles = str(float(model.miles_one_way) * (2 if model.return_trip else 1))
+        session.flush()
+        return _trip_model_to_dict(model)
+
+
+def _trip_correction_to_dict(model) -> dict[str, Any]:
+    """Expose a correction to authorized staff without including account details."""
+    return {
+        "id": model.id,
+        "trip_id": model.trip_id,
+        "author_user_id": model.author_user_id,
+        "note": model.note,
+        "created_at": model.created_at,
+    }
+
+
+def create_trip_correction(trip_id: int, *, author_user_id: int, note: str) -> dict | None:
+    """Append a correction to a paid trip and preserve the original reimbursement."""
+    from .database import unit_of_work
+    from .models import Trip, TripCorrection
+
+    with unit_of_work() as session:
+        trip = session.get(Trip, trip_id)
+        if trip is None:
+            return None
+        if not trip.payment_links:
+            raise ValueError("Correction notes are for paid trips.")
+        correction = TripCorrection(trip_id=trip_id, author_user_id=author_user_id, note=note)
+        session.add(correction)
+        session.flush()
+        return _trip_correction_to_dict(correction)
+
+
+def list_trip_corrections(trip_id: int) -> list[dict]:
+    """List paid-trip correction evidence in the order staff recorded it."""
+    from sqlalchemy import select
+
+    from .database import unit_of_work
+    from .models import TripCorrection
+
+    with unit_of_work() as session:
+        corrections = session.scalars(
+            select(TripCorrection)
+            .where(TripCorrection.trip_id == trip_id)
+            .order_by(TripCorrection.id)
+        )
+        return [_trip_correction_to_dict(row) for row in corrections]
 
 
 def delete_trip(trip_id: int) -> bool:
     """Delete an unpaid trip; linked trips are protected as payment evidence."""
-    conn = get_connection()
-    try:
-        if conn.execute(
-            "SELECT 1 FROM payment_trips WHERE trip_id = ?", (trip_id,)
-        ).fetchone():
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyTripRepository
+
+    with unit_of_work() as session:
+        repository = SQLAlchemyTripRepository(session)
+        model = repository.get(trip_id)
+        if model is None:
+            return False
+        if model.payment_links:
             raise ValueError("A trip linked to a payment cannot be deleted.")
-        cursor = conn.execute("DELETE FROM trips WHERE id = ?", (trip_id,))
-        conn.commit()
-        return cursor.rowcount > 0
-    finally:
-        conn.close()
+        repository.delete(model)
+        return True
 
 
-def create_donation(*, person_id: int, amount_pence: int, donated_date: str | None = None, method: str | None = None, reference: str | None = None, declaration_id: int | None = None, gift_aid_eligible: bool = False, gift_aid_claimed_date: str | None = None, linked_payment_id: int | None = None, linked_payment_ids: Iterable[int] | None = None, received_date: str | None = None, bank_reference: str | None = None, receipt_id: int | None = None) -> dict[str, Any]:
+def create_donation(
+    *,
+    person_id: int,
+    amount_pence: int,
+    donated_date: str | None = None,
+    method: str | None = None,
+    reference: str | None = None,
+    declaration_id: int | None = None,
+    gift_aid_eligible: bool = False,
+    gift_aid_claimed_date: str | None = None,
+    linked_payment_id: int | None = None,
+    linked_payment_ids: Iterable[int] | None = None,
+    received_date: str | None = None,
+    bank_reference: str | None = None,
+    receipt_id: int | None = None,
+) -> dict[str, Any]:
     """Create a positive donation and validate its optional same-person links."""
     payment_ids = _normalize_payment_ids(linked_payment_ids, linked_payment_id)
-    conn = get_connection()
-    try:
+    from .database import unit_of_work
+    from .models import Donation, DonationPayment
+    from .repositories import (
+        SQLAlchemyDeclarationRepository,
+        SQLAlchemyDonationPaymentRepository,
+        SQLAlchemyDonationRepository,
+        SQLAlchemyPersonRepository,
+    )
+
+    with unit_of_work() as session:
         if amount_pence <= 0:
             raise ValueError("Donation amount must be greater than zero.")
-        if conn.execute("SELECT 1 FROM people WHERE id = ?", (person_id,)).fetchone() is None:
+        if SQLAlchemyPersonRepository(session).get(person_id) is None:
             raise ValueError("Person was not found.")
-        _validate_donation_payment_links(conn, payment_ids, person_id)
-        if declaration_id is not None and conn.execute(
-            "SELECT 1 FROM gift_aid_declarations WHERE id = ? AND person_id = ?",
-            (declaration_id, person_id),
-        ).fetchone() is None:
+        _validate_donation_payment_links(session, payment_ids, person_id)
+        declaration = (
+            SQLAlchemyDeclarationRepository(session).get(declaration_id) if declaration_id else None
+        )
+        if declaration_id is not None and (
+            declaration is None or declaration.person_id != person_id
+        ):
             raise ValueError("Linked declaration must belong to the same person.")
-        cursor = conn.execute(
-            """
-            INSERT INTO donations (
-                person_id, amount_pence, donated_date, method, reference,
-                declaration_id, gift_aid_eligible, gift_aid_claimed_date,
-                linked_payment_id, received_date, bank_reference, receipt_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                person_id, encrypt_value(amount_pence), donated_date,
-                encrypt_value(method), encrypt_value(reference),
-                declaration_id, int(gift_aid_eligible), gift_aid_claimed_date,
-                payment_ids[0] if payment_ids else None,
-                received_date, encrypt_value(bank_reference), encrypt_value(receipt_id),
-            ),
+        model = SQLAlchemyDonationRepository(session).add(
+            Donation(
+                person_id=person_id,
+                amount_pence=str(amount_pence),
+                donated_date=donated_date,
+                method=method,
+                reference=reference,
+                declaration_id=declaration_id,
+                gift_aid_eligible=int(gift_aid_eligible),
+                gift_aid_claimed_date=gift_aid_claimed_date,
+                linked_payment_id=payment_ids[0] if payment_ids else None,
+                received_date=received_date,
+                bank_reference=bank_reference,
+                receipt_id=str(receipt_id) if receipt_id is not None else None,
+                active=1,
+            )
         )
-        donation_id = cursor.lastrowid
-        conn.executemany(
-            "INSERT INTO donation_payments (donation_id, payment_id) VALUES (?, ?)",
-            [(donation_id, payment_id) for payment_id in payment_ids],
+        SQLAlchemyDonationPaymentRepository(session).add_all(
+            [
+                DonationPayment(donation_id=model.id, payment_id=payment_id)
+                for payment_id in payment_ids
+            ]
         )
-        conn.commit()
-        return _donation_with_payment_ids(conn, donation_id)
-    finally:
-        conn.close()
+        return _donation_model_to_dict(model)
 
 
 def _normalize_payment_ids(
@@ -1568,8 +2322,10 @@ def _normalize_payment_ids(
     linked_payment_id: int | None = None,
 ) -> list[int]:
     """Normalize legacy single and current multiple payment-link inputs."""
-    values = linked_payment_ids if linked_payment_ids is not None else (
-        [] if linked_payment_id in (None, "") else [linked_payment_id]
+    values = (
+        linked_payment_ids
+        if linked_payment_ids is not None
+        else ([] if linked_payment_id in (None, "") else [linked_payment_id])
     )
     if isinstance(values, (str, bytes)):
         raise ValueError("Linked reimbursement payments must be provided as a list of IDs.")
@@ -1585,55 +2341,61 @@ def _normalize_payment_ids(
 
 
 def _validate_donation_payment_links(
-    conn: sqlite3.Connection,
+    session,
     payment_ids: list[int],
     person_id: int,
 ) -> None:
     """Require every related payment to belong to the donation's person."""
     if not payment_ids:
         return
-    placeholders = ",".join("?" for _ in payment_ids)
-    payments = conn.execute(
-        f"SELECT id, person_id FROM payments WHERE id IN ({placeholders})",
-        payment_ids,
-    ).fetchall()
+    from sqlalchemy import select
+    from .models import Payment
+
+    payments = list(session.scalars(select(Payment).where(Payment.id.in_(payment_ids))))
     if len(payments) != len(payment_ids) or any(
-        payment["person_id"] != person_id for payment in payments
+        payment.person_id != person_id for payment in payments
     ):
         raise ValueError("Linked reimbursement payments must belong to the same person.")
 
 
-def _donation_with_payment_ids(
-    conn: sqlite3.Connection,
-    donation_id: int,
-) -> dict[str, Any] | None:
-    """Return a donation with ordered payment IDs and legacy single-link alias."""
-    donation = _decrypt_fields("donations", conn.execute(
-        "SELECT * FROM donations WHERE id = ?", (donation_id,)
-    ).fetchone())
-    if donation is None:
-        return None
-    payment_ids = [
-        row["payment_id"] for row in conn.execute(
-            "SELECT payment_id FROM donation_payments WHERE donation_id = ? ORDER BY payment_id",
-            (donation_id,),
-        ).fetchall()
-    ]
+def _donation_model_to_dict(model, *, created_by=None, created_at=None) -> dict[str, Any]:
+    """Serialize a donation model with ordered payment links and audit metadata."""
+    from .dtos import DonationDTO
+
+    donation = DonationDTO.model_validate(model).model_dump()
+    payment_ids = sorted(link.payment_id for link in model.payment_links)
     donation["linked_payment_ids"] = payment_ids
     donation["linked_payment_id"] = payment_ids[0] if payment_ids else None
+    donation["gift_aid_eligible"] = int(donation["gift_aid_eligible"])
+    donation["active"] = int(donation["active"])
+    if created_by is not None or created_at is not None:
+        donation["created_by"] = created_by
+        donation["created_at"] = created_at
     return donation
 
 
 def update_donation(donation_id: int, **updates: Any) -> dict[str, Any] | None:
     """Edit donation details or active state, validating links after person changes."""
     allowed = {
-        "person_id", "amount_pence", "donated_date", "method", "reference",
-        "declaration_id", "gift_aid_eligible", "gift_aid_claimed_date",
-        "linked_payment_id", "linked_payment_ids", "received_date", "bank_reference",
-        "receipt_id", "active",
+        "person_id",
+        "amount_pence",
+        "donated_date",
+        "method",
+        "reference",
+        "declaration_id",
+        "gift_aid_eligible",
+        "gift_aid_claimed_date",
+        "linked_payment_id",
+        "linked_payment_ids",
+        "received_date",
+        "bank_reference",
+        "receipt_id",
+        "active",
     }
     updates_to_apply = {key: value for key, value in updates.items() if key in allowed}
-    payment_ids_supplied = "linked_payment_ids" in updates_to_apply or "linked_payment_id" in updates_to_apply
+    payment_ids_supplied = (
+        "linked_payment_ids" in updates_to_apply or "linked_payment_id" in updates_to_apply
+    )
     if payment_ids_supplied:
         payment_ids = _normalize_payment_ids(
             updates_to_apply.get("linked_payment_ids"),
@@ -1664,67 +2426,65 @@ def update_donation(donation_id: int, **updates: Any) -> dict[str, Any] | None:
     if not updates_to_apply and payment_ids is None:
         return get_donation(donation_id)
 
-    conn = get_connection()
-    try:
-        existing = conn.execute(
-            "SELECT person_id FROM donations WHERE id = ?", (donation_id,)
-        ).fetchone()
-        if existing is None:
+    from .database import unit_of_work
+    from .models import DonationPayment
+    from .repositories import (
+        SQLAlchemyDeclarationRepository,
+        SQLAlchemyDonationPaymentRepository,
+        SQLAlchemyDonationRepository,
+        SQLAlchemyPersonRepository,
+    )
+
+    with unit_of_work() as session:
+        model = SQLAlchemyDonationRepository(session).get(donation_id)
+        if model is None:
             return None
-        person_id = updates_to_apply.get("person_id", existing["person_id"])
-        if conn.execute(
-            "SELECT 1 FROM people WHERE id = ?", (person_id,)
-        ).fetchone() is None:
+        person_id = updates_to_apply.get("person_id", model.person_id)
+        if SQLAlchemyPersonRepository(session).get(person_id) is None:
             raise ValueError("Person was not found.")
-        existing_payment_ids = [
-            row["payment_id"] for row in conn.execute(
-                "SELECT payment_id FROM donation_payments WHERE donation_id = ?",
-                (donation_id,),
-            ).fetchall()
-        ]
-        payment_ids = existing_payment_ids if payment_ids is None else payment_ids
-        _validate_donation_payment_links(conn, payment_ids, person_id)
-        declaration_id = updates_to_apply.get(
-            "declaration_id",
-            conn.execute(
-                "SELECT declaration_id FROM donations WHERE id = ?", (donation_id,)
-            ).fetchone()["declaration_id"],
+        payment_ids = (
+            [link.payment_id for link in model.payment_links]
+            if payment_ids is None
+            else payment_ids
         )
-        if declaration_id is not None and conn.execute(
-            "SELECT 1 FROM gift_aid_declarations WHERE id = ? AND person_id = ?",
-            (declaration_id, person_id),
-        ).fetchone() is None:
+        _validate_donation_payment_links(session, payment_ids, person_id)
+        declaration_id = updates_to_apply.get("declaration_id", model.declaration_id)
+        declaration = (
+            SQLAlchemyDeclarationRepository(session).get(declaration_id) if declaration_id else None
+        )
+        if declaration_id is not None and (
+            declaration is None or declaration.person_id != person_id
+        ):
             raise ValueError("Linked declaration must belong to the same person.")
-        # Only known column names reach this SQL; values remain parameterized.
         if payment_ids_supplied:
             updates_to_apply["linked_payment_id"] = payment_ids[0] if payment_ids else None
-        if updates_to_apply:
-            assignments = ", ".join(f"{key} = ?" for key in updates_to_apply)
-            encrypted_updates = _encrypt_fields("donations", updates_to_apply)
-            values = [encrypted_updates[key] for key in updates_to_apply]
-            conn.execute(
-                f"UPDATE donations SET {assignments} WHERE id = ?",
-                (*values, donation_id),
-            )
+        for field, value in updates_to_apply.items():
+            if field in ENCRYPTED_FIELDS["donations"] and value is not None:
+                value = str(value)
+            setattr(model, field, value)
         if payment_ids_supplied:
-            conn.execute("DELETE FROM donation_payments WHERE donation_id = ?", (donation_id,))
-            conn.executemany(
-                "INSERT INTO donation_payments (donation_id, payment_id) VALUES (?, ?)",
-                [(donation_id, payment_id) for payment_id in payment_ids],
+            for link in list(model.payment_links):
+                session.delete(link)
+            session.flush()
+            SQLAlchemyDonationPaymentRepository(session).add_all(
+                [
+                    DonationPayment(donation_id=model.id, payment_id=payment_id)
+                    for payment_id in payment_ids
+                ]
             )
-        conn.commit()
-        return _donation_with_payment_ids(conn, donation_id)
-    finally:
-        conn.close()
+            session.expire(model, ["payment_links"])
+        session.flush()
+        return _donation_model_to_dict(model)
 
 
 def get_donation(donation_id: int) -> dict[str, Any] | None:
     """Fetch a donation by ID, including dormant entries."""
-    conn = get_connection()
-    try:
-        return _donation_with_payment_ids(conn, donation_id)
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyDonationRepository
+
+    with unit_of_work() as session:
+        model = SQLAlchemyDonationRepository(session).get(donation_id)
+        return _donation_model_to_dict(model) if model else None
 
 
 def set_donation_active(donation_id: int, active: bool) -> dict[str, Any] | None:
@@ -1733,56 +2493,213 @@ def set_donation_active(donation_id: int, active: bool) -> dict[str, Any] | None
 
 
 def list_donations(
-    person_id: int | None = None, *, limit: int | None = None, offset: int = 0,
+    person_id: int | None = None,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
     with_total: bool = False,
+    search: str = "",
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List all donations and attach creator metadata when audit history exists."""
-    conn = get_connection()
-    try:
-        query = """
-            SELECT donations.*,
-                   users_created.actor_username AS created_by,
-                   users_created.occurred_at AS created_at
-            FROM donations
-            LEFT JOIN audit_events AS users_created
-              ON users_created.id = (
-                  SELECT MIN(audit_events.id)
-                  FROM audit_events
-                  WHERE audit_events.entity_type = 'donation'
-                    AND audit_events.entity_id = CAST(donations.id AS TEXT)
-                    AND audit_events.action = 'created'
-              )
-        """
-        where = "" if person_id is None else " WHERE donations.person_id = ?"
-        params: tuple[Any, ...] = () if person_id is None else (person_id,)
-        total = conn.execute(
-            "SELECT COUNT(*) AS count FROM donations" +
-            ("" if person_id is None else " WHERE person_id = ?"),
-            params,
-        ).fetchone()["count"]
-        page = " LIMIT ? OFFSET ?" if limit is not None else ""
-        rows = conn.execute(
-            query + where +
-            " ORDER BY donations.donated_date DESC, donations.id DESC" + page,
-            params + ((limit, offset) if limit is not None else ()),
-        ).fetchall()
+    from sqlalchemy import func, select
+    from sqlalchemy.orm import selectinload
+    from .database import unit_of_work
+    from .models import AuditEvent, Donation
+
+    with unit_of_work() as session:
+        filters = () if person_id is None else (Donation.person_id == person_id,)
+        total = int(session.scalar(select(func.count()).select_from(Donation).where(*filters)) or 0)
+        statement = (
+            select(Donation)
+            .where(*filters)
+            .options(selectinload(Donation.payment_links))
+            .order_by(
+                Donation.donated_date.desc(),
+                Donation.id.desc(),
+            )
+        )
+        if limit is not None and not search:
+            statement = statement.limit(limit).offset(offset)
         donations = []
-        for row in rows:
-            donation = _decrypt_fields("donations", row)
-            _decrypt_alias(donation, "created_by")
-            donations.append(donation)
-        for donation in donations:
-            payment_ids = [
-                row["payment_id"] for row in conn.execute(
-                    "SELECT payment_id FROM donation_payments WHERE donation_id = ? ORDER BY payment_id",
-                    (donation["id"],),
-                ).fetchall()
-            ]
-            donation["linked_payment_ids"] = payment_ids
-            donation["linked_payment_id"] = payment_ids[0] if payment_ids else None
+        for model in session.scalars(statement):
+            event = session.scalar(
+                select(AuditEvent)
+                .where(
+                    AuditEvent.entity_type == "donation",
+                    AuditEvent.entity_id == str(model.id),
+                    AuditEvent.action == "created",
+                )
+                .order_by(AuditEvent.id)
+                .limit(1)
+            )
+            donations.append(
+                _donation_model_to_dict(
+                    model,
+                    created_by=event.actor_username if event else None,
+                    created_at=event.occurred_at if event else None,
+                )
+            )
+        if search:
+            query = search.casefold()
+            donations = [item for item in donations if query in json.dumps(item, default=str).casefold()]
+            total = len(donations)
+            if limit is not None:
+                donations = donations[offset : offset + limit]
         return (donations, total) if with_total else donations
-    finally:
-        conn.close()
+
+
+def _payment_trip_quote(
+    session,
+    person_id: int,
+    trip_ids: Iterable[int],
+    *,
+    require_unpaid: bool = True,
+) -> dict[str, Any]:
+    """Calculate trip expenses and optionally enforce payment eligibility.
+
+    Payment creation requires every selected trip to be unpaid. Reports reuse
+    the same calculation for display but may include trips whose reimbursement
+    has already been recorded, so callers explicitly choose whether the
+    eligibility guard applies.
+    """
+    from bisect import bisect_right
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from .models import MileageRateSchedule, Trip
+
+    selected = list(trip_ids)
+    if len(set(selected)) != len(selected):
+        raise ValueError("A trip can only be selected once for a payment.")
+    if len(selected) > 10000 or any(not 0 < trip_id <= 2**63 - 1 for trip_id in selected):
+        raise ValueError("Select up to 10,000 valid trip IDs for a payment.")
+    trips = []
+    for start in range(0, len(selected), 500):
+        trips.extend(
+            session.scalars(
+                select(Trip)
+                .where(Trip.person_id == person_id, Trip.id.in_(selected[start : start + 500]))
+                .options(
+                    selectinload(Trip.payment_links),
+                    selectinload(Trip.origin),
+                    selectinload(Trip.destination),
+                )
+            )
+        )
+    if len(trips) != len(selected):
+        raise ValueError("Every linked trip must belong to the same person as the payment.")
+    if require_unpaid and any(trip.payment_links for trip in trips):
+        raise ValueError("A selected trip has already been linked to a payment.")
+
+    schedules = (
+        [
+            _rate_model_to_dict(model)
+            for model in session.scalars(
+                select(MileageRateSchedule).order_by(MileageRateSchedule.effective_from)
+            )
+        ]
+        if trips
+        else []
+    )
+    schedule_dates = [rate["effective_from"] for rate in schedules]
+    selected_by_id = {trip.id: trip for trip in trips}
+    accumulated_car_miles: dict[str, float] = {}
+    business_miles_before_trip: dict[int, float] = {}
+    all_person_trips = session.execute(
+        select(
+            Trip.id,
+            Trip.trip_date,
+            Trip.tax_year,
+            Trip.vehicle_type,
+            Trip.total_miles,
+        )
+        .where(Trip.person_id == person_id)
+        .order_by(Trip.trip_date, Trip.id)
+    )
+    for trip_id, trip_date, stored_tax_year, vehicle_type, total_miles in all_person_trips:
+        tax_year = stored_tax_year or calculate_tax_year(date.fromisoformat(trip_date))
+        miles_before = accumulated_car_miles.get(tax_year, 0.0)
+        if trip_id in selected_by_id:
+            business_miles_before_trip[trip_id] = miles_before
+        if vehicle_type == "car":
+            accumulated_car_miles[tax_year] = miles_before + float(total_miles)
+
+    breakdowns = []
+    for trip in sorted(trips, key=lambda item: (item.trip_date, item.id)):
+        schedule_index = bisect_right(schedule_dates, trip.trip_date) - 1
+        if schedule_index < 0:
+            raise ValueError(f"No mileage rate schedule applies on {trip.trip_date}.")
+        schedule = schedules[schedule_index]
+        calculation = calculate_trip_amounts(
+            vehicle_type=trip.vehicle_type,
+            trip_date=date.fromisoformat(trip.trip_date),
+            miles_one_way=float(trip.miles_one_way),
+            return_trip=bool(trip.return_trip),
+            passengers=int(trip.passengers),
+            total_business_miles=business_miles_before_trip[trip.id],
+            rate_bands=rate_schedule_to_bands(schedule),
+        )
+        breakdowns.append(
+            {
+                "trip_id": trip.id,
+                "trip_date": trip.trip_date,
+                "vehicle_type": trip.vehicle_type,
+                "return_trip": bool(trip.return_trip),
+                "origin": trip.origin.name if trip.origin else None,
+                "destination": trip.destination.name if trip.destination else None,
+                "business_miles_before_trip": business_miles_before_trip[trip.id],
+                "rate_schedule": schedule,
+                **calculation,
+            }
+        )
+    return {
+        "mileage_band_policy": "per_volunteer_tax_year",
+        "total_amount_pence": sum(item["total_amount_pence"] for item in breakdowns),
+        "trips": breakdowns,
+    }
+
+
+def quote_trip_payment(person_id: int, trip_ids: Iterable[int]) -> dict[str, Any]:
+    """Quote selected stored trips for one payee using the same calculation as payment."""
+    from .database import unit_of_work
+
+    with unit_of_work() as session:
+        return _payment_trip_quote(session, person_id, trip_ids)
+
+
+def quote_trip_expenses(person_id: int, trip_ids: Iterable[int]) -> dict[str, Any]:
+    """Calculate reportable expenses for paid or unpaid stored trips.
+
+    This read-only projection deliberately shares the payment calculator so a
+    report cannot drift from the annual mileage-band rules used at payment.
+    """
+    from .database import unit_of_work
+
+    with unit_of_work() as session:
+        return _payment_trip_quote(
+            session,
+            person_id,
+            trip_ids,
+            require_unpaid=False,
+        )
+
+
+def get_payment_calculation(payment_id: int) -> dict[str, Any] | None:
+    """Read payment evidence on demand without loading it on every list call."""
+    from .database import unit_of_work
+    from .models import Payment
+
+    with unit_of_work() as session:
+        payment = session.get(Payment, payment_id)
+        if payment is None:
+            return None
+        return {
+            "payment_id": payment_id,
+            "calculation": (
+                json.loads(payment.calculation_snapshot) if payment.calculation_snapshot else None
+            ),
+        }
 
 
 def create_payment(
@@ -1794,6 +2711,7 @@ def create_payment(
     reference: str | None = None,
     batch_id: int | None = None,
     trip_ids: Iterable[int] = (),
+    request_token: str | None = None,
 ) -> dict[str, Any]:
     """Create a payment and optionally attach a set of fully reimbursed trips.
 
@@ -1801,253 +2719,203 @@ def create_payment(
     The payment and join rows are committed together so links are all-or-nothing.
     """
     selected_trip_ids = [int(trip_id) for trip_id in trip_ids]
-    if len(set(selected_trip_ids)) != len(selected_trip_ids):
-        raise ValueError("A trip can only be selected once for a payment.")
-    conn = get_connection()
-    try:
+    from sqlalchemy import select
+    from .database import unit_of_work
+    from .models import Payment, PaymentTrip
+    from .repositories import (
+        SQLAlchemyPaymentRepository,
+        SQLAlchemyPaymentTripRepository,
+        SQLAlchemyPersonRepository,
+    )
+
+    with unit_of_work() as session:
+        if request_token:
+            existing = session.scalar(select(Payment).where(Payment.request_token == request_token))
+            if existing is not None:
+                session.expire(existing, ["trip_links", "donation_links"])
+                return _payment_model_to_dict(existing)
         if amount_pence <= 0:
             raise ValueError("Payment amount must be greater than zero.")
-        if conn.execute("SELECT 1 FROM people WHERE id = ?", (person_id,)).fetchone() is None:
+        if SQLAlchemyPersonRepository(session).get(person_id) is None:
             raise ValueError("Person was not found.")
-        if selected_trip_ids:
-            # Validate the complete trip set before inserting either payment or links.
-            placeholders = ",".join("?" for _ in selected_trip_ids)
-            trips = conn.execute(
-                f"SELECT * FROM trips WHERE id IN ({placeholders})",
-                selected_trip_ids,
-            ).fetchall()
-            if len(trips) != len(selected_trip_ids) or any(
-                trip["person_id"] != person_id for trip in trips
-            ):
-                raise ValueError("Every linked trip must belong to the same person as the payment.")
-            allocated = conn.execute(
-                f"""SELECT trip_id FROM payment_trips
-                    WHERE trip_id IN ({placeholders})""",
-                selected_trip_ids,
-            ).fetchall()
-            if allocated:
-                raise ValueError("A selected trip has already been linked to a payment.")
-            # A linked payment represents full reimbursement, never partial allocation.
-            decrypted_trips = [_decrypt_fields("trips", trip) for trip in trips]
-            expected_amount = sum(
-                calculate_trip_amounts(
-                    vehicle_type=trip["vehicle_type"],
-                    trip_date=date.fromisoformat(trip["trip_date"]),
-                    miles_one_way=trip["miles_one_way"],
-                    return_trip=bool(trip["return_trip"]),
-                    passengers=trip["passengers"],
-                    rate_bands=rate_schedule_to_bands(
-                        _rate_schedule_for_date(conn, trip["trip_date"])
-                    ),
-                )["total_amount_pence"]
-                for trip in decrypted_trips
+        calculation = (
+            _payment_trip_quote(session, person_id, selected_trip_ids)
+            if selected_trip_ids
+            else None
+        )
+        if calculation is not None and amount_pence != calculation["total_amount_pence"]:
+            raise ValueError(
+                "Payment amount must equal the total reimbursement for the linked trips "
+                f"({calculation['total_amount_pence']} pence)."
             )
-            if amount_pence != expected_amount:
-                raise ValueError(
-                    "Payment amount must equal the total reimbursement for the linked trips "
-                    f"({expected_amount} pence)."
-                )
-        cursor = conn.execute(
-            "INSERT INTO payments (person_id, batch_id, amount_pence, paid_date, method, reference) VALUES (?, ?, ?, ?, ?, ?)",
-            (person_id, encrypt_value(batch_id), encrypt_value(amount_pence), paid_date,
-             encrypt_value(method), encrypt_value(reference)),
+        model = SQLAlchemyPaymentRepository(session).add(
+            Payment(
+                person_id=person_id,
+                batch_id=str(batch_id) if batch_id is not None else None,
+                amount_pence=str(amount_pence),
+                paid_date=paid_date,
+                method=method,
+                reference=reference,
+                calculation_snapshot=json.dumps(calculation) if calculation is not None else None,
+                request_token=request_token,
+            )
         )
-        # The payment and all of its trip links share this open transaction.
-        conn.executemany(
-            "INSERT INTO payment_trips (payment_id, trip_id) VALUES (?, ?)",
-            [(cursor.lastrowid, trip_id) for trip_id in selected_trip_ids],
+        SQLAlchemyPaymentTripRepository(session).add_all(
+            [PaymentTrip(payment_id=model.id, trip_id=trip_id) for trip_id in selected_trip_ids]
         )
-        conn.commit()
-        row = conn.execute("SELECT * FROM payments WHERE id = ?", (cursor.lastrowid,)).fetchone()
-        payment = _decrypt_fields("payments", row)
-        payment["trip_ids"] = selected_trip_ids
-        return payment
-    finally:
-        conn.close()
+        session.expire(model, ["trip_links", "donation_links"])
+        return _payment_model_to_dict(model)
+
+
+def _payment_model_to_dict(model) -> dict[str, Any]:
+    """Serialize a payment with linked trip details and active donation totals."""
+    linked_trips = sorted(
+        (link.trip for link in model.trip_links),
+        key=lambda trip: (trip.trip_date, trip.id),
+    )
+    trip_items = [
+        {
+            "id": trip.id,
+            "trip_date": trip.trip_date,
+            "total_miles": float(trip.total_miles),
+            "destination_name": trip.destination.name if trip.destination else None,
+        }
+        for trip in linked_trips
+    ]
+    active_donations = [link.donation for link in model.donation_links if link.donation.active]
+    related_total = sum(int(donation.amount_pence) for donation in active_donations)
+    return {
+        "id": model.id,
+        "person_id": model.person_id,
+        "batch_id": int(model.batch_id) if model.batch_id not in (None, "") else None,
+        "amount_pence": int(model.amount_pence),
+        "paid_date": model.paid_date,
+        "method": model.method,
+        "reference": model.reference,
+        "related_donation_amount_pence": related_total,
+        "linked_donation_count": len(active_donations),
+        "linked_trips": trip_items,
+        "trip_ids": [trip["id"] for trip in trip_items],
+        "donated_back_pence": related_total,
+    }
 
 
 def list_payments(
-    person_id: int | None = None, *, limit: int | None = None, offset: int = 0,
+    person_id: int | None = None,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
     with_total: bool = False,
+    search: str = "",
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], int]:
     """List payments with active linked-donation totals and linked-trip details."""
-    conn = get_connection()
-    try:
-        query = "SELECT * FROM payments"
-        where = "" if person_id is None else " WHERE person_id = ?"
-        params: tuple[Any, ...] = () if person_id is None else (person_id,)
-        total = conn.execute(
-            "SELECT COUNT(*) AS count FROM payments" + where, params
-        ).fetchone()["count"]
-        page = " LIMIT ? OFFSET ?" if limit is not None else ""
-        rows = conn.execute(
-            query + where + " ORDER BY paid_date DESC, id DESC" + page,
-            params + ((limit, offset) if limit is not None else ()),
-        ).fetchall()
-        payments = [_decrypt_fields("payments", row) for row in rows]
-        if not payments:
-            return (payments, total) if with_total else payments
-        payment_ids = [payment["id"] for payment in payments]
-        placeholders = ",".join("?" for _ in payment_ids)
-        linked_donations = conn.execute(
-            f"""SELECT donation_payments.payment_id, donations.id, donations.amount_pence
-                FROM donation_payments
-                JOIN donations ON donations.id = donation_payments.donation_id
-                WHERE donations.active = 1
-                  AND donation_payments.payment_id IN ({placeholders})""",
-            payment_ids,
-        ).fetchall()
-        donation_totals = {payment_id: 0 for payment_id in payment_ids}
-        donation_counts = {payment_id: 0 for payment_id in payment_ids}
-        for donation in linked_donations:
-            donation_totals[donation["payment_id"]] += int(decrypt_value(donation["amount_pence"]))
-            donation_counts[donation["payment_id"]] += 1
-        # Batch-load the join rows to avoid one SQL query per payment row.
-        linked_trips = conn.execute(
-            f"""SELECT payment_trips.payment_id, trips.id AS trip_id, trips.trip_date,
-                       trips.total_miles, destinations.name AS destination_name
-                FROM payment_trips
-                JOIN trips ON trips.id = payment_trips.trip_id
-                LEFT JOIN destinations ON destinations.id = trips.destination_id
-                WHERE payment_trips.payment_id IN ({placeholders})
-                ORDER BY trips.trip_date, trips.id""",
-            payment_ids,
-        ).fetchall()
-        # Group related trips in memory, then attach them to their parent payment.
-        trips_by_payment: dict[int, list[dict[str, Any]]] = {
-            payment_id: [] for payment_id in payment_ids
-        }
-        for trip in linked_trips:
-            trips_by_payment[trip["payment_id"]].append({
-                "id": trip["trip_id"],
-                "trip_date": trip["trip_date"],
-                "total_miles": float(decrypt_value(trip["total_miles"])),
-                "destination_name": decrypt_value(trip["destination_name"]),
-            })
-        for payment in payments:
-            payment["related_donation_amount_pence"] = donation_totals[payment["id"]]
-            payment["linked_donation_count"] = donation_counts[payment["id"]]
-            payment["linked_trips"] = trips_by_payment[payment["id"]]
-            payment["trip_ids"] = [trip["id"] for trip in payment["linked_trips"]]
-            payment["donated_back_pence"] = payment["related_donation_amount_pence"]
+    from sqlalchemy import func, select
+    from sqlalchemy.orm import selectinload
+    from .database import unit_of_work
+    from .models import DonationPayment, Payment, PaymentTrip, Trip
+
+    with unit_of_work() as session:
+        filters = () if person_id is None else (Payment.person_id == person_id,)
+        total = int(session.scalar(select(func.count()).select_from(Payment).where(*filters)) or 0)
+        statement = (
+            select(Payment)
+            .where(*filters)
+            .options(
+                selectinload(Payment.donation_links).selectinload(DonationPayment.donation),
+                selectinload(Payment.trip_links)
+                .selectinload(PaymentTrip.trip)
+                .selectinload(Trip.destination),
+            )
+            .order_by(Payment.paid_date.desc(), Payment.id.desc())
+        )
+        if limit is not None and not search:
+            statement = statement.limit(limit).offset(offset)
+        payments = [_payment_model_to_dict(model) for model in session.scalars(statement)]
+        if search:
+            query = search.casefold()
+            payments = [item for item in payments if query in json.dumps(item, default=str).casefold()]
+            total = len(payments)
+            if limit is not None:
+                payments = payments[offset : offset + limit]
         return (payments, total) if with_total else payments
-    finally:
-        conn.close()
 
 
 def list_payment_reconciliation() -> list[dict[str, Any]]:
     """Aggregate payments and donations linked to payments by person."""
-    conn = get_connection()
-    try:
-        people = {
-            row["id"]: decrypt_value(row["name"])
-            for row in conn.execute("SELECT id, name FROM people").fetchall()
-        }
-        payment_totals: dict[int, dict[str, int]] = {}
-        for row in conn.execute("SELECT person_id, amount_pence FROM payments").fetchall():
-            totals = payment_totals.setdefault(row["person_id"], {"total": 0, "count": 0})
-            totals["total"] += int(decrypt_value(row["amount_pence"]))
-            totals["count"] += 1
-        donation_totals: dict[int, dict[str, int]] = {}
-        rows = conn.execute(
-            """SELECT donations.person_id, donations.amount_pence
-               FROM donations
-               WHERE donations.active = 1
-                 AND EXISTS (
-                     SELECT 1 FROM donation_payments
-                     WHERE donation_payments.donation_id = donations.id
-                 )"""
-        ).fetchall()
-        for row in rows:
-            totals = donation_totals.setdefault(row["person_id"], {"total": 0, "count": 0})
-            totals["total"] += int(decrypt_value(row["amount_pence"]))
-            totals["count"] += 1
-        result = []
-        for person_id, payment in payment_totals.items():
-            donation = donation_totals.get(person_id, {"total": 0, "count": 0})
-            result.append({
-                "person_id": person_id,
-                "person_name": people[person_id],
-                "payment_total_pence": payment["total"],
-                "payment_count": payment["count"],
-                "linked_donation_total_pence": donation["total"],
-                "linked_donation_count": donation["count"],
-                "difference_pence": payment["total"] - donation["total"],
-            })
-        return sorted(result, key=lambda row: row["person_name"].casefold())
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyReportRepository
+
+    with unit_of_work() as session:
+        return SQLAlchemyReportRepository(session).payment_reconciliation()
 
 
 def get_summary() -> dict[str, Any]:
     """Return dashboard counts and active donation/payment totals in pence."""
-    conn = get_connection()
-    try:
-        people_count = conn.execute("SELECT COUNT(*) AS count FROM people").fetchone()["count"]
-        trips_count = conn.execute("SELECT COUNT(*) AS count FROM trips").fetchone()["count"]
-        total_donations = sum(
-            int(decrypt_value(row["amount_pence"]))
-            for row in conn.execute("SELECT amount_pence FROM donations WHERE active = 1").fetchall()
-        )
-        total_payments = sum(
-            int(decrypt_value(row["amount_pence"]))
-            for row in conn.execute("SELECT amount_pence FROM payments").fetchall()
-        )
-        return {
-            "people": people_count,
-            "trips": trips_count,
-            "donations_pence": total_donations,
-            "payments_pence": total_payments,
-        }
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyReportRepository
+
+    with unit_of_work() as session:
+        return SQLAlchemyReportRepository(session).summary()
 
 
-def _rate_schedule_for_date(
-    conn: sqlite3.Connection,
-    effective_date: date | str,
-) -> dict[str, Any]:
-    """Fetch the last complete schedule effective on or before a trip date."""
+def _rate_schedule_for_session(session, effective_date: date | str) -> dict[str, Any]:
+    """Load the last schedule effective on or before a trip date through the ORM."""
+    from sqlalchemy import select
+    from .models import MileageRateSchedule
+
     date_value = effective_date.isoformat() if isinstance(effective_date, date) else effective_date
-    # ISO dates sort chronologically, so the latest eligible start is the active schedule.
-    row = conn.execute(
-        """SELECT * FROM mileage_rate_schedules
-           WHERE effective_from <= ?
-           ORDER BY effective_from DESC
-           LIMIT 1""",
-        (date_value,),
-    ).fetchone()
-    if row is None:
+    model = session.scalar(
+        select(MileageRateSchedule)
+        .where(
+            MileageRateSchedule.effective_from <= date_value,
+        )
+        .order_by(MileageRateSchedule.effective_from.desc())
+        .limit(1)
+    )
+    if model is None:
         raise ValueError(f"No mileage rate schedule applies on {date_value}.")
-    return dict(row)
+    return _rate_model_to_dict(model)
+
+
+def _rate_model_to_dict(model) -> dict[str, Any]:
+    """Serialize one mileage-rate ORM model without derived period end dates."""
+    return {
+        "effective_from": model.effective_from,
+        "car_first_10000_pence": model.car_first_10000_pence,
+        "car_over_10000_pence": model.car_over_10000_pence,
+        "motorcycle_pence": model.motorcycle_pence,
+        "bicycle_pence": model.bicycle_pence,
+        "passenger_pence": model.passenger_pence,
+        "created_at": model.created_at,
+    }
 
 
 def get_rate_schedule_for_date(effective_date: date | str) -> dict[str, Any]:
     """Return the complete rate schedule that applies to a given trip date."""
-    conn = get_connection()
-    try:
-        return _rate_schedule_for_date(conn, effective_date)
-    finally:
-        conn.close()
+    from .database import unit_of_work
+
+    with unit_of_work() as session:
+        return _rate_schedule_for_session(session, effective_date)
 
 
 def list_rate_schedules() -> list[dict[str, Any]]:
     """List complete schedules with inclusive end dates derived from the next one."""
-    conn = get_connection()
-    try:
+    from sqlalchemy import select
+    from .database import unit_of_work
+    from .models import MileageRateSchedule
+
+    with unit_of_work() as session:
         schedules = [
-            dict(row) for row in conn.execute(
-                "SELECT * FROM mileage_rate_schedules ORDER BY effective_from"
-            ).fetchall()
+            _rate_model_to_dict(model)
+            for model in session.scalars(
+                select(MileageRateSchedule).order_by(MileageRateSchedule.effective_from)
+            )
         ]
-    finally:
-        conn.close()
     for index, schedule in enumerate(schedules):
         next_start = schedules[index + 1]["effective_from"] if index + 1 < len(schedules) else None
         # Store only start dates; derive inclusive end dates to avoid editing old schedules.
         schedule["effective_to"] = (
-            (date.fromisoformat(next_start) - timedelta(days=1)).isoformat()
-            if next_start else None
+            (date.fromisoformat(next_start) - timedelta(days=1)).isoformat() if next_start else None
         )
     return schedules
 
@@ -2080,163 +2948,78 @@ def create_rate_schedule(
     # Reject bools and floats even though Python considers bool an int subtype.
     for field, value in rate_values.items():
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(f"{field.replace('_', ' ')} must be a whole non-negative pence amount.")
+            raise ValueError(
+                f"{field.replace('_', ' ')} must be a whole non-negative pence amount."
+            )
         if value > 2**63 - 1:
             raise ValueError(f"{field.replace('_', ' ')} is too large.")
 
-    conn = get_connection()
-    try:
-        conn.execute(
-            """INSERT INTO mileage_rate_schedules (
-                   effective_from, car_first_10000_pence, car_over_10000_pence,
-                   motorcycle_pence, bicycle_pence, passenger_pence
-               ) VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                parsed_date.isoformat(),
-                rate_values["car_first_10000_pence"],
-                rate_values["car_over_10000_pence"],
-                rate_values["motorcycle_pence"],
-                rate_values["bicycle_pence"],
-                rate_values["passenger_pence"],
-            ),
+    from .database import unit_of_work
+    from .models import MileageRateSchedule
+    from .repositories import SQLAlchemyMileageRateRepository
+
+    with unit_of_work() as session:
+        repository = SQLAlchemyMileageRateRepository(session)
+        if repository.get(parsed_date.isoformat()) is not None:
+            # Preserve the compatibility exception handled by the existing Flask view.
+            raise sqlite3.IntegrityError("A mileage rate schedule already starts on this date.")
+        model = repository.add(
+            MileageRateSchedule(
+                effective_from=parsed_date.isoformat(),
+                **rate_values,
+            )
         )
-        conn.commit()
-        return dict(conn.execute(
-            "SELECT * FROM mileage_rate_schedules WHERE effective_from = ?",
-            (parsed_date.isoformat(),),
-        ).fetchone())
-    finally:
-        conn.close()
+        return _rate_model_to_dict(model)
 
 
 def get_dashboard_checks() -> dict[str, int | bool]:
     """Return staff-facing record checks without inferring approval or payment status."""
-    conn = get_connection()
-    try:
-        # A missing payment link is only a record check; it does not assert approval.
-        unpaid_trip_count = conn.execute(
-            """SELECT COUNT(*) AS count
-               FROM trips
-               LEFT JOIN payment_trips ON payment_trips.trip_id = trips.id
-               WHERE payment_trips.trip_id IS NULL"""
-        ).fetchone()["count"]
-        # Count only donations already flagged eligible but lacking a usable linked declaration.
-        missing_declaration_count = conn.execute(
-            """SELECT COUNT(*) AS count
-               FROM donations
-               LEFT JOIN gift_aid_declarations
-                 ON gift_aid_declarations.id = donations.declaration_id
-               WHERE donations.active = 1
-                 AND donations.gift_aid_eligible = 1
-                 AND (
-                     gift_aid_declarations.id IS NULL
-                     OR gift_aid_declarations.active = 0
-                     OR gift_aid_declarations.withdrawn_date IS NOT NULL
-                 )"""
-        ).fetchone()["count"]
-        has_active_home_ground = conn.execute(
-            """SELECT EXISTS(
-                   SELECT 1 FROM destinations
-                   WHERE active = 1 AND home_ground = 1
-               ) AS found"""
-        ).fetchone()["found"]
-        return {
-            "trips_without_payment": int(unpaid_trip_count),
-            "eligible_donations_without_active_declaration": int(missing_declaration_count),
-            "has_active_home_ground": bool(has_active_home_ground),
-        }
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyReportRepository
+
+    with unit_of_work() as session:
+        return SQLAlchemyReportRepository(session).dashboard_checks()
 
 
 def get_person_dashboard(person_id: int | None) -> dict[str, Any]:
     """Return a volunteer's trip count and recent trips, scoped to their person ID."""
-    if person_id is None:
-        return {"trip_count": 0, "recent_trips": []}
-    conn = get_connection()
-    try:
-        trip_count = conn.execute(
-            "SELECT COUNT(*) AS count FROM trips WHERE person_id = ?",
-            (person_id,),
-        ).fetchone()["count"]
-        recent_trips = conn.execute(
-            """SELECT trips.trip_date, trips.status, destinations.name AS destination_name
-               FROM trips
-               LEFT JOIN destinations ON destinations.id = trips.destination_id
-               WHERE trips.person_id = ?
-               ORDER BY trips.trip_date DESC, trips.id DESC
-               LIMIT 3""",
-            (person_id,),
-        ).fetchall()
-        recent = []
-        for trip in recent_trips:
-            item = dict(trip)
-            _decrypt_alias(item, "destination_name")
-            recent.append(item)
-        return {
-            "trip_count": int(trip_count),
-            "recent_trips": recent,
-        }
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .repositories import SQLAlchemyReportRepository
+
+    with unit_of_work() as session:
+        return SQLAlchemyReportRepository(session).person_dashboard(person_id)
 
 
 def get_financial_report() -> dict[str, Any]:
     """Return club-wide totals and mileage/payment/donation aggregates by volunteer."""
-    conn = get_connection()
-    try:
-        people = [
-            {"person_id": row["id"], "person_name": decrypt_value(row["name"])}
-            for row in conn.execute(
-                "SELECT id, name FROM people WHERE role = ?",
-                (Role.VOLUNTEER.value,),
-            ).fetchall()
-        ]
-        trip_totals: dict[int, dict[str, float | int]] = {}
-        for row in conn.execute("SELECT person_id, total_miles FROM trips").fetchall():
-            totals = trip_totals.setdefault(row["person_id"], {"count": 0, "miles": 0.0})
-            totals["count"] += 1
-            totals["miles"] += float(decrypt_value(row["total_miles"]))
-        payment_totals: dict[int, int] = {}
-        expenses_paid_pence = 0
-        for row in conn.execute("SELECT person_id, amount_pence FROM payments").fetchall():
-            amount = int(decrypt_value(row["amount_pence"]))
-            expenses_paid_pence += amount
-            payment_totals[row["person_id"]] = payment_totals.get(row["person_id"], 0) + amount
-        donation_totals: dict[int, int] = {}
-        donations_pence = 0
-        eligible_donations_pence = 0
-        for row in conn.execute(
-            "SELECT person_id, amount_pence, gift_aid_eligible FROM donations WHERE active = 1"
-        ).fetchall():
-            amount = int(decrypt_value(row["amount_pence"]))
-            donations_pence += amount
-            if row["gift_aid_eligible"]:
-                eligible_donations_pence += amount
-            donation_totals[row["person_id"]] = donation_totals.get(row["person_id"], 0) + amount
-        volunteers = []
-        for person in people:
-            person_id = person["person_id"]
-            trips = trip_totals.get(person_id, {"count": 0, "miles": 0.0})
-            payments = payment_totals.get(person_id, 0)
-            donations = donation_totals.get(person_id, 0)
-            volunteers.append({
-                **person,
-                "trip_count": trips["count"],
-                "total_miles": trips["miles"],
-                "expenses_paid_pence": payments,
-                "donations_pence": donations,
-                "difference_pence": payments - donations,
-            })
-        volunteers.sort(key=lambda row: (row["person_name"].casefold(), row["person_id"]))
-        return {
-            "totals": {
-                "expenses_paid_pence": expenses_paid_pence,
-                "donations_pence": donations_pence,
-                "eligible_donations_pence": eligible_donations_pence,
-                "gift_aid_pence": (eligible_donations_pence * 25 + 50) // 100,
-            },
-            "volunteers": volunteers,
-        }
-    finally:
-        conn.close()
+    from .database import unit_of_work
+    from .models import Trip
+    from .repositories import SQLAlchemyReportRepository
+    from sqlalchemy import select
+
+    with unit_of_work() as session:
+        report = SQLAlchemyReportRepository(session).financial_report()
+        outstanding_total = 0
+        for volunteer in report["volunteers"]:
+            trip_ids = list(
+                session.scalars(
+                    select(Trip.id).where(
+                        Trip.person_id == volunteer["person_id"],
+                        ~Trip.payment_links.any(),
+                    )
+                )
+            )
+            quote = (
+                _payment_trip_quote(
+                    session,
+                    volunteer["person_id"],
+                    trip_ids,
+                    require_unpaid=False,
+                )
+                if trip_ids
+                else {"total_amount_pence": 0}
+            )
+            volunteer["expenses_outstanding_pence"] = int(quote["total_amount_pence"])
+            outstanding_total += volunteer["expenses_outstanding_pence"]
+        report["totals"]["expenses_outstanding_pence"] = outstanding_total
+        return report

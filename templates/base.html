@@ -11,6 +11,7 @@
   </head>
   {# Body metadata lets the shared JavaScript select role/page-specific behavior. #}
   <body data-role="{{ current_user.role }}" data-page="{{ request.endpoint }}">
+    <a class="visually-hidden-focusable position-fixed top-0 start-0 bg-white p-2" href="#main-content">Skip to main content</a>
     {# Navigation links are filtered by role; route handlers enforce access again. #}
     <nav class="navbar navbar-expand-lg app-navbar sticky-top">
       <div class="container-fluid app-container">
@@ -22,7 +23,7 @@
         </button>
         <div class="collapse navbar-collapse" id="main-navigation">
           <ul class="navbar-nav me-auto ms-lg-4">
-            <li class="nav-item"><a class="nav-link {{ 'active' if request.endpoint == 'main.index' else '' }}" href="{{ url_for('main.index') }}">Dashboard</a></li>
+            <li class="nav-item"><a class="nav-link {{ 'active' if request.endpoint == 'main.index' else '' }}" {% if request.endpoint == 'main.index' %}aria-current="page"{% endif %} href="{{ url_for('main.index') }}">Dashboard</a></li>
             <li class="nav-item"><a class="nav-link {{ 'active' if request.endpoint == 'main.how_it_works_page' else '' }}" href="{{ url_for('main.how_it_works_page') }}">How it works</a></li>
             <li class="nav-item"><a class="nav-link {{ 'active' if request.endpoint == 'people.people_page' else '' }}" href="{{ url_for('people.people_page') }}">People</a></li>
             <li class="nav-item"><a class="nav-link {{ 'active' if request.endpoint == 'trips.trips_page' else '' }}" href="{{ url_for('trips.trips_page') }}">Trips</a></li>
@@ -51,7 +52,7 @@
       </div>
     </nav>
     {# Child templates insert their page-specific content into this main region. #}
-    <main class="container-fluid app-container py-4 py-lg-5">
+    <main id="main-content" tabindex="-1" class="container-fluid app-container py-4 py-lg-5">
       <div class="page-help-toolbar">
         <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#page-instructions-modal">Instructions</button>
         <button class="btn btn-outline-secondary btn-sm ms-2" type="button" data-bs-toggle="modal" data-bs-target="#privacy-notice-modal">Privacy / GDPR</button>
@@ -94,12 +95,19 @@
         <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Close</button></div>
       </div></div>
     </div>
-    {# Bootstrap provides responsive components; app.js wires forms and tables. #}
+    {# Domain scripts remain external classic scripts for the strict nonce-free CSP. #}
     <script src="{{ url_for('static', filename='vendor/bootstrap/5.3.3/bootstrap.bundle.min.js') }}"></script>
-    <script src="{{ url_for('static', filename='js/help.js', v='2') }}"></script>
+    <script src="{{ url_for('static', filename='js/help.js', v='3') }}"></script>
     <script src="{{ url_for('static', filename='js/privacy.js', v='2') }}"></script>
     <script src="{{ url_for('static', filename='js/auth-history.js', v='1') }}"></script>
-    <script src="{{ url_for('static', filename='js/app.js', v='6') }}"></script>
+    <script src="{{ url_for('static', filename='js/api.js', v='2') }}"></script>
+    <script src="{{ url_for('static', filename='js/shared-rendering.js', v='5') }}"></script>
+    <script src="{{ url_for('static', filename='js/destinations.js', v='2') }}"></script>
+    <script src="{{ url_for('static', filename='js/trips.js', v='3') }}"></script>
+    <script src="{{ url_for('static', filename='js/people.js', v='2') }}"></script>
+    <script src="{{ url_for('static', filename='js/finance.js', v='3') }}"></script>
+    <script src="{{ url_for('static', filename='js/reports.js', v='4') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js', v='11') }}"></script>
   </body>
 </html>
 

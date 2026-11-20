@@ -1,5 +1,5 @@
 ﻿{% extends "base.html" %}
-{% block title %}Trips Â· Club Gift Aid Manager{% endblock %}
+{% block title %}Trips &middot; Club Gift Aid Manager{% endblock %}
 {% block content %}
 {# Trip entry uses active saved locations, server-validated mileage, and consent. #}
 <div class="page-heading">
@@ -25,9 +25,9 @@
             Location columns use location IDs. Road distance is calculated from each location pair during import; any existing <code>miles_one_way</code> column is ignored. The full file is checked before any trips are saved.
           </div>
           <a class="small" href="{{ url_for('trips.trips_import_template') }}">Download CSV template</a>
-          <div id="trip-import-errors" class="alert alert-danger mt-3 mb-0" role="alert" hidden></div>
+          <div data-csv-status role="status" aria-live="polite" hidden></div>
         </div>
-        <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary px-4" type="submit">Upload trips</button></div>
+        <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-outline-primary" type="submit" name="preview">Preview CSV</button><button class="btn btn-primary px-4" type="submit">Upload trips</button></div>
       </form>
     </div>
   </div>
@@ -40,12 +40,12 @@
       {% if current_user.role == Role.ADMIN.value %}
       <div class="col-md-6"><label class="form-label" for="trip-person-select">Person</label><select class="form-select" name="person_id" id="trip-person-select" required></select></div>
       {% endif %}
-      <div class="col-md-6"><label class="form-label" for="trip-origin-select">Origin</label><select class="form-select" name="origin_id" id="trip-origin-select" required><option value="">Select an origin</option></select><div class="form-text">Defaults to the club home ground when one is set.</div></div>
-      <div class="col-md-6"><label class="form-label" for="trip-destination-select">Destination</label><select class="form-select" name="destination_id" id="trip-destination-select" required><option value="">Select a destination</option></select></div>
+      <div class="col-md-6"><label class="form-label" for="trip-origin-search">Origin</label><input class="form-control" id="trip-origin-search" list="trip-origin-options" autocomplete="off" placeholder="Search name, town, or postcode" required /><datalist id="trip-origin-options"></datalist><select class="d-none" name="origin_id" id="trip-origin-select" required><option value="">Select an origin</option></select><div class="form-text">Defaults to the club home ground when one is set.</div></div>
+      <div class="col-md-6"><label class="form-label" for="trip-destination-search">Destination</label><input class="form-control" id="trip-destination-search" list="trip-destination-options" autocomplete="off" placeholder="Search name, town, or postcode" required /><datalist id="trip-destination-options"></datalist><select class="d-none" name="destination_id" id="trip-destination-select" required><option value="">Select a destination</option></select></div>
       <div class="col-md-6"><label class="form-label" for="trip-date">Trip date</label><input id="trip-date" class="form-control" type="date" name="trip_date" required /></div>
       <div class="col-md-4"><label class="form-label" for="trip-vehicle">Vehicle</label><select id="trip-vehicle" class="form-select" name="vehicle_type"><option value="car">Car / van</option><option value="motorcycle">Motorcycle</option><option value="bicycle">Bicycle</option></select></div>
       {# Route distance is read-only and filled by the public geocoder/router API. #}
-      <div class="col-md-4"><label class="form-label" for="trip-miles">One-way road miles</label><input id="trip-miles" class="form-control" type="number" step="0.1" min="0" name="miles_one_way" readonly required /><div class="form-text" id="trip-route-status" aria-live="polite">Select an origin and destination to calculate road mileage.</div><div class="form-text">Routing data: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">Â© OpenStreetMap contributors</a>.</div></div>
+      <div class="col-md-4"><label class="form-label" for="trip-miles">One-way road miles</label><input id="trip-miles" class="form-control" type="number" step="0.1" min="0" readonly /><div class="form-text" id="trip-route-status" aria-live="polite">Select an origin and destination to calculate road mileage.</div><div class="form-text">Routing data: <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">&copy; OpenStreetMap contributors</a>.</div></div>
       <div class="col-md-4"><label class="form-label" for="trip-passengers">Fellow adult volunteers carried</label><input id="trip-passengers" class="form-control" type="number" min="0" name="passengers" value="0" /></div>
       <div class="col-12 form-check ms-2"><input class="form-check-input" type="checkbox" name="return_trip" id="return-trip" value="true" /><label class="form-check-label" for="return-trip">Return trip</label></div>
       <div class="col-12 form-check ms-2"><input class="form-check-input" type="checkbox" name="declaration_accepted" id="declaration-accepted" value="true" required /><label class="form-check-label" for="declaration-accepted">{{ declaration_text }}</label></div>
@@ -57,13 +57,38 @@
 <div class="card shadow-sm">
   <div class="table-toolbar">
     <div><h2 class="h6 mb-1">Trip history</h2><span class="table-count">Mileage submissions and claim details.</span></div>
-    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">âŒ•</span><input class="form-control" type="search" placeholder="Search tripsâ€¦" aria-label="Search trips" data-table-search="trips-table-body" /></div></div>
+    <div class="table-search"><div class="table-search-wrap"><span class="table-search-icon" aria-hidden="true">&#128269;</span><input class="form-control" type="search" placeholder="Search trips&hellip;" aria-label="Search trips" data-table-search="trips-table-body" /></div></div>
   </div>
   <div class="table-responsive"><table class="table table-hover align-middle">
     <thead><tr><th>Date</th><th>Person</th><th>Origin</th><th>Destination</th><th>Tax year</th><th>Vehicle</th><th>Miles</th><th>Declaration</th><th>Status</th>{% if current_user.role != Role.VOLUNTEER.value %}<th></th>{% endif %}</tr></thead>
     <tbody id="trips-table-body"></tbody>
   </table></div>
 </div>
+{% if current_user.role != Role.VOLUNTEER.value %}
+<div class="modal fade" id="trip-correction-modal" tabindex="-1" aria-labelledby="trip-correction-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <form id="trip-correction-form">
+        <div class="modal-header">
+          <h2 class="modal-title fs-5" id="trip-correction-title">Paid trip corrections</h2>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <p>Record the corrected details and why they changed. The original trip and payment stay on file.</p>
+          <ul id="trip-corrections-list"></ul>
+          <label class="form-label" for="trip-correction-note">Correction note</label>
+          <textarea class="form-control" id="trip-correction-note" name="note" maxlength="2000" required></textarea>
+          <p id="trip-correction-message" class="form-text mb-0" role="status"></p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-light" type="button" data-bs-dismiss="modal">Close</button>
+          <button class="btn btn-primary" type="submit">Record correction</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endif %}
 {% endblock %}
 {% block page_instructions %}
 <p>Submit one trip using the form, or upload a CSV to import several. Select active origin and destination locations; the one-way road distance is calculated automatically when both are selected.</p>

@@ -1,0 +1,18 @@
+{% set page_title = "Save your recovery codes" %}
+{% include "mfa/_shell_start.html" %}
+<div class="alert alert-warning" role="alert">
+  These codes are shown only once. Each code works once if your authenticator is unavailable.
+</div>
+<ul class="list-group font-monospace mb-4" aria-label="Recovery codes">
+  {% for code in recovery_codes %}<li class="list-group-item user-select-all">{{ code }}</li>{% endfor %}
+</ul>
+<p>Print or copy these codes and store them somewhere private and separate from your phone. Do not email them or save them in a shared document.</p>
+<form method="post" action="{{ url_for('mfa.setup_complete') }}">
+  <input type="hidden" name="_csrf_token" value="{{ csrf_token }}" />
+  <div class="form-check mb-3">
+    <input class="form-check-input" id="saved" name="saved" value="yes" type="checkbox" required />
+    <label class="form-check-label" for="saved">I have saved my recovery codes securely.</label>
+  </div>
+  <button class="btn btn-primary" type="submit">Finish and sign in</button>
+</form>
+{% include "mfa/_shell_end.html" %}

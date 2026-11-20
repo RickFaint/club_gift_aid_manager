@@ -1,4 +1,4 @@
-﻿"""Main routes.
+"""Main routes.
 
 A Blueprint is Flask's way of collecting related URL handlers.  Defining a
 route here does not start a second application: create_app() later registers
@@ -7,9 +7,16 @@ this collection on the one Flask application object.
 
 from flask import Blueprint
 
-from .shared import *  # noqa: F403 - shared view vocabulary is intentionally centralised
+from .shared import (
+    Role,
+    g,
+    get_current_privacy_notice,
+    get_privacy_notice_version,
+    jsonify,
+    render_template,
+)
 from ..auth.decorators import roles_required
-from ..import_jobs import get_import, serialise_import
+from ..services.imports import get_import, serialise_import
 
 
 blueprint = Blueprint("main", __name__)
@@ -23,6 +30,7 @@ def import_status(job_id: str):
     if job is None:
         return jsonify({"error": "Import job not found."}), 404
     return jsonify(serialise_import(job))
+
 
 @blueprint.get("/privacy-notice")
 def privacy_notice_current():
@@ -50,5 +58,3 @@ def index():
 def how_it_works_page():
     """Render the role-specific application guides."""
     return render_template("how_it_works.html")
-
-
