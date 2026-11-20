@@ -377,7 +377,8 @@ class SQLAlchemyReportRepository:
                 payment = item.payment_links[0].payment if item.payment_links else None
                 active_donations = (
                     [link.donation for link in payment.donation_links if link.donation.active]
-                    if payment else []
+                    if payment
+                    else []
                 )
                 received_donations = [
                     donation for donation in active_donations if donation.received_date

@@ -316,7 +316,7 @@ def test_destination_management_page_and_access_are_role_gated():
         assert volunteer.get("/destinations/page").status_code == 403
         choices = volunteer.get("/destinations").get_json()["items"]
         assert [item["id"] for item in choices] == [destination["id"]]
-        assert set(choices[0]) == {"id", "name", "active", "home_ground"}
+        assert set(choices[0]) == {"id", "name", "town_city", "postcode", "active", "home_ground"}
         assert (
             volunteer.post(
                 "/destinations",

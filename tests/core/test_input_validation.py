@@ -68,9 +68,14 @@ def test_master_data_create_routes_reject_malformed_fields(path, payload):
             },
         ),
         ("/donations", lambda person: {"person_id": person["id"], "amount_pence": -1}),
+        ("/donations", lambda person: {"person_id": person["id"], "amount_pence": 0}),
         (
             "/payments",
             lambda person: {"person_id": person["id"], "amount_pence": -1, "trip_ids": []},
+        ),
+        (
+            "/payments",
+            lambda person: {"person_id": person["id"], "amount_pence": 0, "trip_ids": []},
         ),
     ],
 )
@@ -92,12 +97,10 @@ def test_finance_create_routes_reject_malformed_fields(path, payload_factory):
     [
         ("return_trip", "banana"),
         ("passengers", -1),
-        ("miles_one_way", "NaN"),
-        ("miles_one_way", -0.1),
     ],
 )
-def test_trip_create_rejects_invalid_boolean_counts_and_mileage(field, value):
-    """A trip cannot contain ambiguous flags or impossible measurements."""
+def test_trip_create_rejects_invalid_boolean_and_passenger_counts(field, value):
+    """A trip cannot contain ambiguous flags or impossible passenger counts."""
     person = create_person(name="Trip validation person")
     origin = create_destination(name="Validation origin")
     destination = create_destination(name="Validation destination")

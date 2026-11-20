@@ -76,12 +76,12 @@ def test_admin_person_export_collects_scoped_dsar_records():
     assert set(payload) == {"person", "trips", "declarations", "donations", "payments"}
 
 
-def test_anonymizing_person_preserves_transactions_and_audit_history():
-    """Person erasure clears identifiers and linked login but retains record history."""
+def test_deleting_connected_person_makes_record_dormant_and_preserves_history():
+    """A referenced person is retained as dormant instead of being deleted."""
     person = create_person(
         name="Sensitive Person",
         email="private@example.com",
-        phone="555-0123",
+        phone="5550123",
         notes="Private note",
     )
     account = create_user(
@@ -119,20 +119,14 @@ def test_anonymizing_person_preserves_transactions_and_audit_history():
     )
 
     assert response.status_code == 200
-    assert response.get_json()["anonymized"] is True
-    anonymized_person = get_person(person["id"])
-    assert anonymized_person["name"] == f"Deleted person {person['id']}"
-    assert anonymized_person["email"] is None
-    assert anonymized_person["phone"] is None
-    assert anonymized_person["notes"] is None
-    assert anonymized_person["active"] == 0
+    assert response.get_json()["dormant"] is True
+    dormant_person = get_person(person["id"])
+    assert dormant_person["name"] == "Sensitive Person"
+    assert dormant_person["active"] == 0
 
     retained_declaration = db_module.list_declarations(person["id"])[0]
     assert retained_declaration["id"] == declaration["id"]
-    assert retained_declaration["full_name"] == f"Deleted person {person['id']}"
-    assert retained_declaration["home_address"] is None
-    assert retained_declaration["postcode"] is None
-    assert retained_declaration["evidence_ref"] is None
+    assert retained_declaration["full_name"] == "Sensitive Person"
 
     retained_trip = next(row for row in db_module.list_trips() if row["id"] == trip["id"])
     assert retained_trip["person_id"] == person["id"]
@@ -144,13 +138,35 @@ def test_anonymizing_person_preserves_transactions_and_audit_history():
     assert (
         next(row for row in list_payments() if row["id"] == payment["id"])["amount_pence"] == 3500
     )
-    assert get_user_by_id(account["id"])["is_active"] == 0
-    assert get_user_by_id(account["id"])["person_id"] is None
-    assert person_client.get("/trips").status_code == 401
+    assert get_user_by_id(account["id"])["is_active"] == 1
+    assert person_client.get("/trips").status_code == 200
     audit_events = admin.get("/admin/audit").get_json()["items"]
     assert any(
-        event["action"] == "anonymized"
+        event["action"] == "dormant"
         and event["entity_type"] == "person"
         and event["entity_id"] == str(person["id"])
         for event in audit_events
     )
+
+
+def test_deleting_unconnected_person_removes_record():
+    """An unused directory entry can be permanently deleted."""
+    person = create_person(name="Unused person", phone="01234567890")
+    response = signed_in_client().delete(
+        f"/people/{person['id']}",
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["deleted"] is True
+    assert get_person(person["id"]) is None
+
+
+def test_person_api_rejects_non_numeric_phone_number():
+    """Optional phone values remain strings but new values contain digits only."""
+    response = signed_in_client().post(
+        "/people",
+        json={"name": "Phone validation", "phone": "+44 123"},
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+    assert response.status_code == 400
+    assert "numbers only" in response.get_json()["error"]

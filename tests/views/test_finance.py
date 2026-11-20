@@ -6,7 +6,9 @@ request handling, and persistence are exercised together.
 """
 
 from datetime import date
+import base64
 from io import BytesIO
+from zipfile import ZipFile
 import hashlib
 import re
 import sqlite3
@@ -72,6 +74,126 @@ def test_empty_report_csv_exports_have_headers(section):
     assert len(response.get_data(as_text=True).splitlines()) == 1
 
 
+def test_admin_can_export_all_tables_and_reports_without_secrets():
+    """The administrator archive includes complete datasets but not credentials."""
+    response = signed_in_client().get("/reports/all-csv")
+    assert response.status_code == 200
+    assert response.mimetype == "application/zip"
+    with ZipFile(BytesIO(response.data)) as archive:
+        names = set(archive.namelist())
+        assert "MANIFEST.csv" in names
+        assert "reports/trips.csv" in names
+        assert "reports/donations.csv" in names
+        assert "reports/payments.csv" in names
+        assert "tables/people.csv" in names
+        assert "password_hash" not in archive.read("tables/users.csv").decode()
+        assert "secret" not in archive.read("tables/user_mfa.csv").decode()
+
+
+def test_all_csv_export_is_admin_only():
+    """Treasurers and unauthenticated callers cannot download the full archive."""
+    assert signed_in_client("treasurer").get("/reports/all-csv").status_code == 403
+    assert app.test_client().get("/reports/all-csv").status_code in {302, 401}
+
+
+def test_declaration_image_is_stored_as_base64_and_decoded_for_viewing():
+    """Authorised staff can upload and view image evidence without exposing base64 in lists."""
+    person = create_person(name="Declaration image donor")
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+        "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    client = signed_in_client()
+    created = client.post(
+        "/declarations",
+        json={
+            "person_id": person["id"],
+            "full_name": person["name"],
+            "evidence_image_base64": base64.b64encode(image).decode("ascii"),
+            "evidence_image_mime": "image/png",
+        },
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+    assert created.status_code == 201
+    declaration = created.get_json()
+    assert declaration["has_evidence_image"] is True
+    assert "evidence_image_base64" not in declaration
+
+    viewed = client.get(f"/declarations/{declaration['id']}/evidence-image")
+    assert viewed.status_code == 200
+    assert viewed.mimetype == "image/png"
+    assert viewed.data == image
+
+
+@pytest.mark.parametrize(
+    ("content", "mime"),
+    [
+        (b"not an image", "image/png"),
+        (b"\x89PNG\r\n\x1a\nnot-a-real-png", "image/png"),
+        (b"%PDF-1.7\nnot-a-real-pdf\n%%EOF", "application/pdf"),
+    ],
+)
+def test_declaration_upload_rejects_forged_file_content(content, mime):
+    """An allowlisted MIME value cannot disguise arbitrary or truncated bytes."""
+    person = create_person(name="Forged declaration donor")
+    response = signed_in_client().post(
+        "/declarations",
+        json={
+            "person_id": person["id"],
+            "full_name": person["name"],
+            "evidence_image_base64": base64.b64encode(content).decode("ascii"),
+            "evidence_image_mime": mime,
+        },
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+    assert response.status_code == 400
+    assert "content is invalid" in response.get_json()["error"]
+
+
+def test_declaration_upload_accepts_a_structurally_valid_pdf():
+    """PDF declaration evidence is checked from its bytes and can be downloaded."""
+    prefix = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"
+    pdf = prefix + b"xref\n0 2\n0000000000 65535 f \ntrailer\n<< /Root 1 0 R >>\nstartxref\n"
+    pdf += str(len(prefix)).encode("ascii") + b"\n%%EOF\n"
+    person = create_person(name="PDF declaration donor")
+    client = signed_in_client()
+    response = client.post(
+        "/declarations",
+        json={
+            "person_id": person["id"],
+            "full_name": person["name"],
+            "evidence_image_base64": base64.b64encode(pdf).decode("ascii"),
+            "evidence_image_mime": "application/pdf",
+        },
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+    assert response.status_code == 201
+    viewed = client.get(f"/declarations/{response.get_json()['id']}/evidence-image")
+    assert viewed.status_code == 200
+    assert viewed.mimetype == "application/pdf"
+    assert viewed.data == pdf
+
+
+def test_declaration_upload_rejects_mime_content_mismatch():
+    """A valid file is rejected when its claimed MIME type describes another format."""
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
+        "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    )
+    person = create_person(name="Mismatched declaration donor")
+    response = signed_in_client().post(
+        "/declarations",
+        json={
+            "person_id": person["id"],
+            "full_name": person["name"],
+            "evidence_image_base64": base64.b64encode(png).decode("ascii"),
+            "evidence_image_mime": "application/pdf",
+        },
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+    assert response.status_code == 400
+
+
 def test_payment_creation_retry_is_idempotent():
     """Ensure repeating one payment request cannot create duplicate financial records."""
     person = create_person(name="Idempotent payment")
@@ -83,6 +205,18 @@ def test_payment_creation_retry_is_idempotent():
     assert first.status_code == second.status_code == 201
     assert first.get_json()["id"] == second.get_json()["id"]
     assert len(list_payments()) == 1
+
+
+def test_donation_update_rejects_zero_amount():
+    """An existing donation cannot be changed to a zero-value record."""
+    person = create_person(name="Positive donation donor")
+    donation = create_donation(person_id=person["id"], amount_pence=100)
+    response = signed_in_client().put(
+        f"/donations/{donation['id']}",
+        json={"amount_pence": 0},
+        headers={"X-CSRF-Token": "test-csrf-token"},
+    )
+    assert response.status_code == 400
 
 
 def test_linked_declaration_cannot_be_reassigned_to_another_person():
@@ -418,6 +552,7 @@ def test_admin_financial_report_aggregates_totals_and_volunteer_activity():
     report = response.get_json()
     assert report["totals"] == {
         "expenses_paid_pence": 7500,
+        "expenses_outstanding_pence": 1175,
         "donations_pence": 7000,
         "eligible_donations_pence": 5000,
         "gift_aid_pence": 1250,
@@ -432,6 +567,7 @@ def test_admin_financial_report_aggregates_totals_and_volunteer_activity():
         "trip_count": 2,
         "total_miles": 22.5,
         "expenses_paid_pence": 7500,
+        "expenses_outstanding_pence": 950,
         "donations_pence": 6000,
         "difference_pence": 1500,
     }

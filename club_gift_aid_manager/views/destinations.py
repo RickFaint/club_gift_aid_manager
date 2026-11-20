@@ -62,7 +62,9 @@ def destinations_index():
         page = choices[offset : offset + limit]
         return jsonify(paginated_response(page, len(choices), limit, offset))
     items, total = list_destinations(
-        limit=limit, offset=offset, with_total=True,
+        limit=limit,
+        offset=offset,
+        with_total=True,
         search=get_search_query(),
     )
     return jsonify(paginated_response(items, total, limit, offset))
@@ -151,9 +153,7 @@ def _destinations_import_now():
                 continue
             home_ground_value = (row.get("home_ground") or "").strip().lower()
             if home_ground_value not in {"", "true", "1", "yes", "on", "false", "0", "no", "off"}:
-                errors.append(
-                    f"Row {row_number} has an invalid home_ground value; use yes or no."
-                )
+                errors.append(f"Row {row_number} has an invalid home_ground value; use yes or no.")
                 continue
             home_ground = home_ground_value in {"true", "1", "yes", "on"}
             limits = {"name": 200, "address": 500, "town_city": 200, "postcode": 20, "notes": 2000}
@@ -196,10 +196,12 @@ def _destinations_import_now():
             home_ground_rows.append(row_number)
 
     if len(home_ground_rows) > 1:
-        return jsonify({
-            "error": "Only one row may be marked as the club home ground.",
-            "errors": [f"Row {number}: marked as home ground." for number in home_ground_rows],
-        }), 400
+        return jsonify(
+            {
+                "error": "Only one row may be marked as the club home ground.",
+                "errors": [f"Row {number}: marked as home ground." for number in home_ground_rows],
+            }
+        ), 400
 
     if csv_import_is_preview():
         conflicts = destination_import_conflicts(locations)
@@ -209,11 +211,13 @@ def _destinations_import_now():
                 for index, name in conflicts.items()
             ]
             return jsonify({"error": errors[0], "errors": errors}), 409
-        return jsonify({
-            "preview": True,
-            "valid_rows": len(locations),
-            "skipped_duplicate_rows": skipped_duplicate_rows,
-        })
+        return jsonify(
+            {
+                "preview": True,
+                "valid_rows": len(locations),
+                "skipped_duplicate_rows": skipped_duplicate_rows,
+            }
+        )
 
     try:
         with csv_import_writes():

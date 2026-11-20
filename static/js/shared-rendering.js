@@ -102,18 +102,25 @@ function showPageStatus(message) {
   status.focus();
 }
 
-/** Convert a bounded declaration image to a database-ready base64 payload. */
+/**
+ * Convert an optional declaration image to the JSON representation expected by Flask.
+ *
+ * File inputs cannot be represented directly in JSON. FileReader produces a data URL
+ * such as `data:image/png;base64,...`; only the characters after the comma are stored,
+ * while the MIME type is sent separately. These browser checks improve usability, but
+ * the Flask route repeats them because browser-side validation is not a security boundary.
+ */
 async function declarationImagePayload(form, payload) {
   const file = form.elements.namedItem('evidence_image')?.files?.[0];
   if (!file) return;
-  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-    throw new Error('Use a PNG, JPEG, or WebP declaration image.');
+  if (!['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(file.type)) {
+    throw new Error('Use a PNG, JPEG, WebP, or PDF declaration file.');
   }
-  if (file.size > 512 * 1024) throw new Error('The declaration image must be 512 KiB or smaller.');
+  if (file.size > 512 * 1024) throw new Error('The declaration file must be 512 KiB or smaller.');
   const dataUrl = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.addEventListener('load', () => resolve(reader.result));
-    reader.addEventListener('error', () => reject(new Error('The declaration image could not be read.')));
+    reader.addEventListener('error', () => reject(new Error('The declaration file could not be read.')));
     reader.readAsDataURL(file);
   });
   payload.evidence_image_base64 = String(dataUrl).split(',', 2)[1];
@@ -216,6 +223,8 @@ function attachForm(formId, endpoint, afterSave = refreshPageData) {
       }
     }
     if (formId === 'donation-form') {
+      // Forms use human-friendly decimal pounds. The API and database use integer
+      // pence so calculations never inherit binary floating-point rounding errors.
       payload.amount_pence = Math.round(Number(payload.amount_pounds) * 100);
       delete payload.amount_pounds;
     }

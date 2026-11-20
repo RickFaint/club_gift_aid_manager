@@ -15,7 +15,20 @@ if TYPE_CHECKING:
 
 
 class GiftAidDeclaration(Base):
-    """Map declaration evidence and the exact privacy notice accepted with it."""
+    """Map declaration evidence and the exact privacy notice accepted with it.
+
+    ``Mapped`` annotations describe the Python value while ``mapped_column``
+    describes its database representation.  The foreign keys connect a
+    declaration to its person and immutable privacy-notice version; matching
+    ``relationship`` attributes provide convenient object navigation without
+    creating additional database columns.
+
+    The image is base64 because that is the requested portable database format.
+    ``EncryptedText`` transparently encrypts it before SQL is issued and decrypts
+    it when read.  ``deferred=True`` prevents this potentially large value from
+    being selected during ordinary report/list queries; SQLAlchemy loads it only
+    when code explicitly accesses ``evidence_image_base64``.
+    """
 
     __tablename__ = "gift_aid_declarations"
 
@@ -30,6 +43,9 @@ class GiftAidDeclaration(Base):
     evidence_ref: Mapped[str | None] = mapped_column(EncryptedText)
     evidence_image_base64: Mapped[str | None] = mapped_column(EncryptedText, deferred=True)
     evidence_image_mime: Mapped[str | None] = mapped_column(Text)
+    has_evidence_image: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     privacy_notice_version_id: Mapped[int] = mapped_column(
         ForeignKey("privacy_notice_versions.id"), nullable=False
     )

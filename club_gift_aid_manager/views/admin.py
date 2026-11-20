@@ -179,7 +179,9 @@ def audit_index():
 def users_index():
     """List safe account metadata without returning password hashes."""
     limit, offset = get_pagination()
-    items, total = list_users(limit=limit, offset=offset, with_total=True, search=get_search_query())
+    items, total = list_users(
+        limit=limit, offset=offset, with_total=True, search=get_search_query()
+    )
     return jsonify(paginated_response(items, total, limit, offset))
 
 
@@ -231,7 +233,9 @@ def _users_import_now():
         reader.fieldnames = headers
     except (UnicodeDecodeError, csv.Error):
         return jsonify(
-            {"error": "The CSV file could not be read. Use UTF-8 encoding and valid CSV formatting."}
+            {
+                "error": "The CSV file could not be read. Use UTF-8 encoding and valid CSV formatting."
+            }
         ), 400
 
     required_fields = {"username", "role"}
@@ -293,7 +297,9 @@ def _users_import_now():
             for user in created:
                 audit_change("created", "user", user["id"], ("username", "role", "person_id"))
     except sqlite3.IntegrityError:
-        return jsonify({"error": "An account conflicts with existing data. No accounts were imported."}), 409
+        return jsonify(
+            {"error": "An account conflicts with existing data. No accounts were imported."}
+        ), 409
     return jsonify({"imported": len(created), "items": created}), 201
 
 

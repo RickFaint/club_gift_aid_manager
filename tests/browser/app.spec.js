@@ -130,8 +130,8 @@ test('route-distance requests are POSTed with CSRF and populate mileage', async 
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ distance_miles: 12.4 }) });
   });
   await page.goto('/trips/page');
-  await page.locator('#trip-origin-select').selectOption({ label: 'Club Ground' });
-  await page.locator('#trip-destination-select').selectOption({ label: 'Away Ground' });
+  await page.locator('#trip-origin-search').fill('Club Ground');
+  await page.locator('#trip-destination-search').fill('Away Ground');
   await expect(page.locator('#trip-miles')).toHaveValue('12.4');
 
   expect(captured.method()).toBe('POST');

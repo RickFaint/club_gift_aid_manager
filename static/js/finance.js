@@ -19,7 +19,7 @@ function renderDeclarations() {
         <td>${dateLabel(entry.withdrawn_date)}</td>
         <td><span class="status-badge ${entry.active ? '' : 'inactive'}">${entry.active ? 'Active' : 'Dormant'}</span></td>
         <td class="text-end text-nowrap">
-          ${entry.has_evidence_image ? `<a class="btn btn-sm btn-outline-primary me-1" href="/declarations/${Number(entry.id)}/evidence-image" target="_blank" rel="noopener">View image</a>` : ''}
+          ${entry.has_evidence_image ? `<a class="btn btn-sm btn-outline-primary me-1" href="/declarations/${Number(entry.id)}/evidence-image" target="_blank" rel="noopener">View file</a>` : ''}
           <button class="btn btn-sm btn-light border me-1" data-edit-declaration="${entry.id}">Edit</button>
           <button class="btn btn-sm ${entry.active ? 'btn-outline-danger' : 'btn-outline-success'}" data-toggle-declaration="${entry.id}" data-active="${entry.active ? 'false' : 'true'}">${entry.active ? 'Make dormant' : 'Restore'}</button>
         </td>

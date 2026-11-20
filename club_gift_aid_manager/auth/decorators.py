@@ -86,7 +86,10 @@ def authentication_is_recent(
     authenticated_at: object, max_age_seconds: int = RECENT_AUTHENTICATION_SECONDS
 ) -> bool:
     """Check whether a signed authentication timestamp is still fresh."""
-    return isinstance(authenticated_at, int) and 0 <= int(time.time()) - authenticated_at <= max_age_seconds
+    return (
+        isinstance(authenticated_at, int)
+        and 0 <= int(time.time()) - authenticated_at <= max_age_seconds
+    )
 
 
 def recent_authentication_required(max_age_seconds: int = RECENT_AUTHENTICATION_SECONDS):

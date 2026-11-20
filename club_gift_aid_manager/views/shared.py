@@ -142,7 +142,9 @@ def _import_actor(submission):
         or actor["person_id"] != person_id
     ):
         raise ImportAuthorizationError("Your account access changed. Submit the import again.", 403)
-    if getattr(g, "csv_recent_auth_required", False) and not authentication_is_recent(authenticated_at):
+    if getattr(g, "csv_recent_auth_required", False) and not authentication_is_recent(
+        authenticated_at
+    ):
         raise ImportAuthorizationError("Sign in again before submitting an account import.", 401)
     return actor
 
@@ -187,7 +189,10 @@ def queue_csv_import(kind: str, worker, *, recent_auth_required: bool = False):
     application = current_app._get_current_object()
     user = g.current_user
     submission = (
-        user["id"], user["session_version"], user["role"], user["person_id"],
+        user["id"],
+        user["session_version"],
+        user["role"],
+        user["person_id"],
         session.get("authenticated_at"),
     )
     query_string = {"preview": "1"} if csv_import_is_preview() else {}

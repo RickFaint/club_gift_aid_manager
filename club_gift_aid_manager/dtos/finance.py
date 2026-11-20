@@ -47,7 +47,7 @@ class DonationCreateDTO(DTO):
     """Validate a donation and its optional declaration and payment references."""
 
     person_id: int = Field(gt=0)
-    amount_pence: int = Field(ge=0)
+    amount_pence: int = Field(gt=0)
     donated_date: date | None = None
     method: str | None = Field(default=None, max_length=100)
     reference: str | None = Field(default=None, max_length=500)
@@ -85,7 +85,7 @@ class PaymentCreateDTO(DTO):
     """Validate a reimbursement payment and the complete trips it settles."""
 
     person_id: int = Field(gt=0)
-    amount_pence: int = Field(ge=0)
+    amount_pence: int = Field(gt=0)
     paid_date: date | None = None
     method: str = Field(default="bank transfer", min_length=1, max_length=100)
     reference: str | None = Field(default=None, max_length=500)

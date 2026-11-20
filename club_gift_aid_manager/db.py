@@ -270,6 +270,9 @@ def create_app_database() -> None:
                 scope TEXT,
                 withdrawn_date TEXT,
                 evidence_ref TEXT,
+                evidence_image_base64 TEXT,
+                evidence_image_mime TEXT,
+                has_evidence_image INTEGER NOT NULL DEFAULT 0,
                 privacy_notice_version_id INTEGER NOT NULL,
                 privacy_notice_sha256 TEXT NOT NULL,
                 FOREIGN KEY(person_id) REFERENCES people(id),
@@ -501,6 +504,19 @@ def create_app_database() -> None:
             conn.execute(
                 "ALTER TABLE gift_aid_declarations ADD COLUMN active INTEGER NOT NULL DEFAULT 1"
             )
+        if "evidence_image_base64" not in declaration_columns:
+            conn.execute("ALTER TABLE gift_aid_declarations ADD COLUMN evidence_image_base64 TEXT")
+        if "evidence_image_mime" not in declaration_columns:
+            conn.execute("ALTER TABLE gift_aid_declarations ADD COLUMN evidence_image_mime TEXT")
+        if "has_evidence_image" not in declaration_columns:
+            conn.execute(
+                "ALTER TABLE gift_aid_declarations "
+                "ADD COLUMN has_evidence_image INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.execute(
+                "UPDATE gift_aid_declarations SET has_evidence_image = 1 "
+                "WHERE evidence_image_base64 IS NOT NULL AND evidence_image_base64 <> ''"
+            )
         current_notice = conn.execute(
             "SELECT id, text_sha256 FROM privacy_notice_versions ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -722,7 +738,9 @@ def list_audit_events(
         events = [AuditEventDTO.model_validate(model).model_dump() for model in models]
         if search:
             query = search.casefold()
-            events = [event for event in events if query in json.dumps(event, default=str).casefold()]
+            events = [
+                event for event in events if query in json.dumps(event, default=str).casefold()
+            ]
             total = len(events)
             events = events[offset : offset + max(1, min(int(limit), 1000))]
         return (events, total) if with_total else events
@@ -1248,6 +1266,13 @@ def delete_or_deactivate_person(person_id: int) -> str | None:
     Financial, trip, declaration, and account relationships must retain their
     person key for audit integrity. A completely unused directory entry has no
     such history and can safely be removed instead of anonymised.
+
+    The operation runs inside one SQLAlchemy unit of work.  Each ``count`` query
+    asks the database whether the person's primary key is referenced by one of
+    the protected record types.  Setting ``active`` to zero is a soft delete:
+    the row and foreign keys remain available to reports, but normal active-only
+    selectors omit it.  ``session.delete`` is used only when every count is zero.
+    The unit-of-work context commits on success and rolls back on an exception.
     """
     from sqlalchemy import func, select
     from .database import unit_of_work
@@ -1257,6 +1282,8 @@ def delete_or_deactivate_person(person_id: int) -> str | None:
         person = session.get(Person, person_id)
         if person is None:
             return None
+        # ``any`` short-circuits after the first relationship is found, avoiding
+        # needless queries for a person that is already known to have history.
         related = any(
             session.scalar(select(func.count()).select_from(model).where(field == person_id))
             for model, field in (
@@ -1383,6 +1410,7 @@ def create_declaration(
                 evidence_ref=evidence_ref,
                 evidence_image_base64=evidence_image_base64,
                 evidence_image_mime=evidence_image_mime,
+                has_evidence_image=int(bool(evidence_image_base64)),
                 privacy_notice_version_id=notice.id,
                 privacy_notice_sha256=notice.text_sha256,
                 active=1,
@@ -1432,11 +1460,7 @@ def update_declaration(declaration_id: int, **fields: Any) -> dict[str, Any] | N
         model = SQLAlchemyDeclarationRepository(session).get(declaration_id)
         if model is None:
             return None
-        if (
-            "person_id" in updates
-            and updates["person_id"] != model.person_id
-            and model.donations
-        ):
+        if "person_id" in updates and updates["person_id"] != model.person_id and model.donations:
             raise ValueError(
                 "A declaration linked to donations cannot be reassigned to another person."
             )
@@ -1485,7 +1509,9 @@ def list_declarations(
         declarations = [_declaration_model_to_dict(model) for model in session.scalars(statement)]
         if search:
             query = search.casefold()
-            declarations = [item for item in declarations if query in json.dumps(item, default=str).casefold()]
+            declarations = [
+                item for item in declarations if query in json.dumps(item, default=str).casefold()
+            ]
             total = len(declarations)
             if limit is not None:
                 declarations = declarations[offset : offset + limit]
@@ -1493,11 +1519,16 @@ def list_declarations(
 
 
 def _declaration_model_to_dict(model) -> dict[str, Any]:
-    """Serialize a declaration model through its response DTO."""
+    """Serialize declaration metadata without exposing confidential image data.
+
+    The lightweight persisted flag tells clients whether to show the protected
+    evidence endpoint.  It avoids loading and decrypting the deferred base64
+    payload during list and detail queries.
+    """
     from .dtos import DeclarationDTO
 
     result = DeclarationDTO.model_validate(model).model_dump()
-    result["has_evidence_image"] = bool(model.evidence_image_base64)
+    result["has_evidence_image"] = bool(model.has_evidence_image)
     result["active"] = int(bool(result["active"]))
     return result
 
@@ -1711,7 +1742,14 @@ def list_destinations(
 
 
 def list_destination_choices() -> list[dict[str, Any]]:
-    """Return active location labels plus the home-ground flag for trip selectors."""
+    """Return searchable fields for every active trip-location choice.
+
+    This deliberately uses a narrow SQLAlchemy ``select`` rather than loading
+    complete ``Destination`` objects.  The browser needs only the identifier,
+    display/search text, and home-ground flag, so notes and other columns are not
+    decrypted or transferred.  ``session.execute`` returns row mappings that
+    are converted into plain dictionaries suitable for Flask's JSON response.
+    """
     from sqlalchemy import select
 
     from .database import unit_of_work
@@ -1748,7 +1786,14 @@ def _route_location_fingerprint(destination: dict[str, Any]) -> str:
     values = [
         destination.get(field)
         for field in (
-            "id", "active", "name", "address", "town_city", "postcode", "latitude", "longitude"
+            "id",
+            "active",
+            "name",
+            "address",
+            "town_city",
+            "postcode",
+            "latitude",
+            "longitude",
         )
     ]
     return hashlib.sha256(json.dumps(values, default=str).encode("utf-8")).hexdigest()
@@ -1772,11 +1817,10 @@ def get_cached_route_miles(
         if origin is None or destination is None or cached.expires_at <= current_time:
             session.delete(cached)
             return None
-        if (
-            cached.origin_fingerprint
-            != _route_location_fingerprint(_destination_model_to_dict(origin))
-            or cached.destination_fingerprint
-            != _route_location_fingerprint(_destination_model_to_dict(destination))
+        if cached.origin_fingerprint != _route_location_fingerprint(
+            _destination_model_to_dict(origin)
+        ) or cached.destination_fingerprint != _route_location_fingerprint(
+            _destination_model_to_dict(destination)
         ):
             session.delete(cached)
             return None
@@ -2541,7 +2585,9 @@ def list_donations(
             )
         if search:
             query = search.casefold()
-            donations = [item for item in donations if query in json.dumps(item, default=str).casefold()]
+            donations = [
+                item for item in donations if query in json.dumps(item, default=str).casefold()
+            ]
             total = len(donations)
             if limit is not None:
                 donations = donations[offset : offset + limit]
@@ -2833,7 +2879,9 @@ def list_payments(
         payments = [_payment_model_to_dict(model) for model in session.scalars(statement)]
         if search:
             query = search.casefold()
-            payments = [item for item in payments if query in json.dumps(item, default=str).casefold()]
+            payments = [
+                item for item in payments if query in json.dumps(item, default=str).casefold()
+            ]
             total = len(payments)
             if limit is not None:
                 payments = payments[offset : offset + limit]
@@ -2991,35 +3039,68 @@ def get_person_dashboard(person_id: int | None) -> dict[str, Any]:
 
 
 def get_financial_report() -> dict[str, Any]:
-    """Return club-wide totals and mileage/payment/donation aggregates by volunteer."""
+    """Return financial aggregates, including currently outstanding expenses.
+
+    Outstanding mileage is calculated in one chronological pass across all
+    trips.  Annual car-mile totals are accumulated per volunteer and tax year,
+    preserving the same band rules as payment quotation without issuing trip
+    and rate-schedule queries once per volunteer.
+
+    No rows are changed here: the SQLAlchemy session is used only for reads and
+    the calculated pence values are added to the response dictionaries.
+    """
     from .database import unit_of_work
-    from .models import Trip
     from .repositories import SQLAlchemyReportRepository
-    from sqlalchemy import select
 
     with unit_of_work() as session:
         report = SQLAlchemyReportRepository(session).financial_report()
-        outstanding_total = 0
+        outstanding = _outstanding_expenses_by_person(session)
         for volunteer in report["volunteers"]:
-            trip_ids = list(
-                session.scalars(
-                    select(Trip.id).where(
-                        Trip.person_id == volunteer["person_id"],
-                        ~Trip.payment_links.any(),
-                    )
-                )
-            )
-            quote = (
-                _payment_trip_quote(
-                    session,
-                    volunteer["person_id"],
-                    trip_ids,
-                    require_unpaid=False,
-                )
-                if trip_ids
-                else {"total_amount_pence": 0}
-            )
-            volunteer["expenses_outstanding_pence"] = int(quote["total_amount_pence"])
-            outstanding_total += volunteer["expenses_outstanding_pence"]
-        report["totals"]["expenses_outstanding_pence"] = outstanding_total
+            volunteer["expenses_outstanding_pence"] = outstanding.get(volunteer["person_id"], 0)
+        report["totals"]["expenses_outstanding_pence"] = sum(outstanding.values())
         return report
+
+
+def _outstanding_expenses_by_person(session) -> dict[int, int]:
+    """Price every unpaid trip using batched data and annual mileage totals."""
+    from bisect import bisect_right
+
+    from sqlalchemy import select
+
+    from .models import MileageRateSchedule, PaymentTrip, Trip
+
+    schedules = [
+        _rate_model_to_dict(model)
+        for model in session.scalars(
+            select(MileageRateSchedule).order_by(MileageRateSchedule.effective_from)
+        )
+    ]
+    schedule_dates = [rate["effective_from"] for rate in schedules]
+    paid_trip_ids = set(session.scalars(select(PaymentTrip.trip_id)))
+    trips = session.scalars(select(Trip).order_by(Trip.person_id, Trip.trip_date, Trip.id))
+
+    annual_car_miles: dict[tuple[int, str], float] = {}
+    outstanding: dict[int, int] = {}
+    for trip in trips:
+        tax_year = trip.tax_year or calculate_tax_year(date.fromisoformat(trip.trip_date))
+        annual_key = (trip.person_id, tax_year)
+        miles_before = annual_car_miles.get(annual_key, 0.0)
+        if trip.id not in paid_trip_ids:
+            schedule_index = bisect_right(schedule_dates, trip.trip_date) - 1
+            if schedule_index < 0:
+                raise ValueError(f"No mileage rate schedule applies on {trip.trip_date}.")
+            calculation = calculate_trip_amounts(
+                vehicle_type=trip.vehicle_type,
+                trip_date=date.fromisoformat(trip.trip_date),
+                miles_one_way=float(trip.miles_one_way),
+                return_trip=bool(trip.return_trip),
+                passengers=int(trip.passengers),
+                total_business_miles=miles_before,
+                rate_bands=rate_schedule_to_bands(schedules[schedule_index]),
+            )
+            outstanding[trip.person_id] = (
+                outstanding.get(trip.person_id, 0) + calculation["total_amount_pence"]
+            )
+        if trip.vehicle_type == "car":
+            annual_car_miles[annual_key] = miles_before + float(trip.total_miles)
+    return outstanding

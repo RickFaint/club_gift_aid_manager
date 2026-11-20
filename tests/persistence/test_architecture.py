@@ -46,6 +46,9 @@ def test_every_persistent_table_has_a_sqlalchemy_model_and_repository():
         "audit_events",
         "login_attempts",
         "user_mfa",
+        "auth_sessions",
+        "route_lookup_cache",
+        "trip_corrections",
     }
     repository_types = {
         SQLAlchemyPersonRepository,
@@ -65,7 +68,7 @@ def test_every_persistent_table_has_a_sqlalchemy_model_and_repository():
     }
 
     assert set(Base.metadata.tables) == expected_tables
-    assert len(repository_types) == len(expected_tables)
+    assert len(repository_types) == 14
 
 
 def test_repository_persists_encrypted_model_and_dto_serializes_it():

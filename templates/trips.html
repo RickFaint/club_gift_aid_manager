@@ -25,7 +25,7 @@
             Location columns use location IDs. Road distance is calculated from each location pair during import; any existing <code>miles_one_way</code> column is ignored. The full file is checked before any trips are saved.
           </div>
           <a class="small" href="{{ url_for('trips.trips_import_template') }}">Download CSV template</a>
-          <div data-csv-status role="status" aria-live="polite" hidden></div>
+          <div id="trip-import-errors" data-csv-status role="status" aria-live="polite" hidden></div>
         </div>
         <div class="modal-footer"><button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancel</button><button class="btn btn-outline-primary" type="submit" name="preview">Preview CSV</button><button class="btn btn-primary px-4" type="submit">Upload trips</button></div>
       </form>

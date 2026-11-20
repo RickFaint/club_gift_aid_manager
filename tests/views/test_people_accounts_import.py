@@ -22,7 +22,7 @@ def test_staff_can_import_people_atomically() -> None:
         signed_in_client("treasurer"),
         "/people/import",
         "name,email,phone,role,active,notes\n"
-        "Alex Example,alex@example.org,01234 567890,volunteer,yes,Driver\n"
+        "Alex Example,alex@example.org,01234567890,volunteer,yes,Driver\n"
         "Pat Parent,,,parent,no,Emergency contact\n",
         "people.csv",
     )

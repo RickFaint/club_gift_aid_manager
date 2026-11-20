@@ -10,12 +10,18 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Add encrypted image payload and allowlisted MIME metadata columns."""
+    """Add declaration-image payload and MIME metadata columns.
+
+    Alembic calls ``upgrade`` once when moving an existing database to this
+    revision.  The physical payload column is TEXT; encryption is applied by the
+    SQLAlchemy ``EncryptedText`` type when application code reads or writes it.
+    Both columns are nullable so existing declarations remain valid.
+    """
     op.add_column("gift_aid_declarations", sa.Column("evidence_image_base64", sa.Text()))
     op.add_column("gift_aid_declarations", sa.Column("evidence_image_mime", sa.Text()))
 
 
 def downgrade() -> None:
-    """Remove declaration image evidence columns."""
+    """Reverse this revision, permanently removing stored image evidence."""
     op.drop_column("gift_aid_declarations", "evidence_image_mime")
     op.drop_column("gift_aid_declarations", "evidence_image_base64")

@@ -166,7 +166,9 @@ def _verify_database_schema(database_path: Path) -> None:
     if missing_unique:
         raise DatabaseRevisionError(
             "Database schema is incomplete; missing unique constraints: "
-            + ", ".join(f"{table}({', '.join(columns)})" for table, columns in sorted(missing_unique))
+            + ", ".join(
+                f"{table}({', '.join(columns)})" for table, columns in sorted(missing_unique)
+            )
         )
     missing_foreign_keys = REQUIRED_FOREIGN_KEYS - foreign_keys
     if missing_foreign_keys:

@@ -46,6 +46,7 @@ from ..core.validation import (
 )
 from ..dtos import DeclarationCreateDTO, DonationCreateDTO, PaymentCreateDTO
 from ..core.validation import parse_dto
+from ..core.uploads import ALLOWED_EVIDENCE_MIMES, detect_evidence_mime
 from ..services.workflows import DonationService, PaymentService, WorkflowNotFoundError
 
 
@@ -90,19 +91,39 @@ def declarations_index():
 @blueprint.post("/declarations")
 @roles_required(Role.ADMIN, Role.TREASURER)
 def declarations_create():
-    """Create a donor declaration and record its creation in the audit log."""
+    """Validate and persist a donor declaration, including optional image evidence.
+
+    Flask has already decoded the JSON request by the time ``get_payload`` is
+    called.  Pydantic validates the ordinary declaration fields, while this
+    route performs the checks that require decoding the uploaded image.  The
+    browser checks the same constraints for a quick response, but those checks
+    are repeated here because clients can call the HTTP API without using our
+    forms.
+
+    The database helper opens the SQLAlchemy unit of work and stores the model.
+    Only after that succeeds do we create the audit entry and return HTTP 201.
+    """
     payload = get_payload()
     require_fields(payload, ("person_id", "full_name"))
     dto = parse_dto(DeclarationCreateDTO, payload)
-    if dto.evidence_image_base64:
-        if dto.evidence_image_mime not in {"image/png", "image/jpeg", "image/webp"}:
-            return jsonify({"error": "Use a PNG, JPEG, or WebP declaration image."}), 400
+    # A data URL is split by the browser before submission, so the API receives
+    # the base64 characters and MIME type separately. ``validate=True`` rejects
+    # malformed data instead of silently ignoring invalid characters.
+    if dto.evidence_image_base64 or dto.evidence_image_mime:
+        if not dto.evidence_image_base64 or dto.evidence_image_mime not in ALLOWED_EVIDENCE_MIMES:
+            return jsonify({"error": "Use a PNG, JPEG, WebP, or PDF declaration file."}), 400
         try:
             decoded_image = base64.b64decode(dto.evidence_image_base64, validate=True)
         except (ValueError, binascii.Error):
-            return jsonify({"error": "The declaration image is not valid base64."}), 400
+            return jsonify({"error": "The declaration file is not valid base64."}), 400
         if len(decoded_image) > 512 * 1024:
-            return jsonify({"error": "The declaration image must be 512 KiB or smaller."}), 400
+            return jsonify({"error": "The declaration file must be 512 KiB or smaller."}), 400
+        if detect_evidence_mime(decoded_image) != dto.evidence_image_mime:
+            return jsonify(
+                {
+                    "error": "The declaration file content is invalid or does not match its MIME type."
+                }
+            ), 400
 
     notice_version_id = payload.get("privacy_notice_version_id")
     if notice_version_id not in (None, ""):
@@ -155,7 +176,17 @@ def declarations_get(declaration_id: int):
 @blueprint.get("/declarations/<int:declaration_id>/evidence-image")
 @roles_required(Role.ADMIN, Role.TREASURER)
 def declarations_evidence_image(declaration_id: int):
-    """Decode and display stored declaration image evidence to authorised staff."""
+    """Return stored base64 evidence as an ordinary protected image response.
+
+    ``unit_of_work`` supplies a short-lived SQLAlchemy Session. ``Session.get``
+    performs a primary-key lookup and materialises the deferred encrypted image
+    column only for this endpoint.  Returning raw bytes with the allowlisted
+    MIME type lets the browser display the image without publishing a filesystem
+    path or embedding the confidential base64 value in declaration-list JSON.
+
+    A corrupt or historically unsupported value is reported as HTTP 422 rather
+    than being served with attacker-controlled content metadata.
+    """
     from ..database import unit_of_work
     from ..models import GiftAidDeclaration
 
@@ -163,12 +194,14 @@ def declarations_evidence_image(declaration_id: int):
         declaration = database.get(GiftAidDeclaration, declaration_id)
         if declaration is None or not declaration.evidence_image_base64:
             return jsonify({"error": "Declaration image not found."}), 404
-        if declaration.evidence_image_mime not in {"image/png", "image/jpeg", "image/webp"}:
-            return jsonify({"error": "Stored declaration image type is invalid."}), 422
+        if declaration.evidence_image_mime not in ALLOWED_EVIDENCE_MIMES:
+            return jsonify({"error": "Stored declaration file type is invalid."}), 422
         try:
             image = base64.b64decode(declaration.evidence_image_base64, validate=True)
         except (ValueError, binascii.Error):
-            return jsonify({"error": "Stored declaration image is invalid."}), 422
+            return jsonify({"error": "Stored declaration file is invalid."}), 422
+        if detect_evidence_mime(image) != declaration.evidence_image_mime:
+            return jsonify({"error": "Stored declaration file content is invalid."}), 422
         return Response(image, mimetype=declaration.evidence_image_mime)
 
 
@@ -267,6 +300,8 @@ def donations_update(donation_id: int):
             payload[field] = as_bool(payload[field])
     if "amount_pence" in payload:
         payload["amount_pence"] = as_non_negative_int(payload["amount_pence"], "amount_pence")
+        if payload["amount_pence"] == 0:
+            return jsonify({"error": "amount_pence must be greater than zero."}), 400
     for field in ("donated_date", "gift_aid_claimed_date", "received_date"):
         if field in payload:
             payload[field] = as_optional_date(payload[field], field)
@@ -304,7 +339,8 @@ def payments_create():
     idempotency_key = request.headers.get("Idempotency-Key", "")
     request_token = (
         hashlib.sha256(f"{g.current_user['id']}:{idempotency_key}".encode()).hexdigest()
-        if 16 <= len(idempotency_key) <= 200 else None
+        if 16 <= len(idempotency_key) <= 200
+        else None
     )
 
     try:

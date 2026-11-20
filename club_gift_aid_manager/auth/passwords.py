@@ -5,7 +5,17 @@ from __future__ import annotations
 import secrets
 import time
 
-from flask import Blueprint, current_app, g, jsonify, redirect, render_template, request, session, url_for
+from flask import (
+    Blueprint,
+    current_app,
+    g,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
 from itsdangerous import BadData, URLSafeTimedSerializer
 
 from .decorators import recent_authentication_required, roles_required
@@ -41,9 +51,7 @@ def activate_account():
     try:
         if not code or len(code) > 512:
             raise BadData("Invalid code")
-        user_id, version = _invitation_serializer().loads(
-            code, max_age=INVITATION_MAX_AGE_SECONDS
-        )
+        user_id, version = _invitation_serializer().loads(code, max_age=INVITATION_MAX_AGE_SECONDS)
         user = get_user_by_id(user_id)
         if (
             user is None
@@ -100,11 +108,13 @@ def admin_issue_invitation(user_id: int):
         entity_type="user",
         entity_id=user_id,
     )
-    return jsonify({
-        "code": _invitation_serializer().dumps([user_id, target["session_version"]]),
-        "activation_path": url_for("passwords.activate_account"),
-        "expires_in_hours": INVITATION_MAX_AGE_SECONDS // 3600,
-    })
+    return jsonify(
+        {
+            "code": _invitation_serializer().dumps([user_id, target["session_version"]]),
+            "activation_path": url_for("passwords.activate_account"),
+            "expires_in_hours": INVITATION_MAX_AGE_SECONDS // 3600,
+        }
+    )
 
 
 def begin_password_change(user: dict, *, authenticated_at: int | None = None) -> None:

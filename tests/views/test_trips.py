@@ -463,9 +463,13 @@ def test_claim_creation_retry_is_idempotent(monkeypatch):
     client = signed_in_client("volunteer", person["id"])
     headers = {"X-CSRF-Token": "test-csrf-token", "Idempotency-Key": "claim-retry-key-12345678"}
     payload = {
-        "origin_id": destination["id"], "destination_id": destination["id"],
-        "trip_date": "2026-05-01", "vehicle_type": "car", "passengers": 0,
-        "return_trip": False, "declaration_accepted": True,
+        "origin_id": destination["id"],
+        "destination_id": destination["id"],
+        "trip_date": "2026-05-01",
+        "vehicle_type": "car",
+        "passengers": 0,
+        "return_trip": False,
+        "declaration_accepted": True,
     }
     first = client.post("/claim", json=payload, headers=headers)
     second = client.post("/claim", json=payload, headers=headers)

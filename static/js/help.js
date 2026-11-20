@@ -1,4 +1,8 @@
 const fieldHelpText = {
+  preview: 'Validate the selected CSV and show row errors without saving records.',
+  note: 'Explain the correction clearly so the original paid evidence remains auditable.',
+  is_active: 'Controls whether this account may sign in.',
+  evidence_image: 'Upload an optional PNG, JPEG, WebP, or PDF copy of the signed declaration, up to 512 KiB.',
   'privacy-notice-editor': 'Enter the privacy and GDPR information to show to all users. Only administrators can edit and save it. Plain text, up to 64 KB.',
   notice: 'The privacy statement displayed to all users. Review it for accuracy and complete the club-specific details before saving.',
   effective_date: 'The date this newly published privacy notice version takes effect.',

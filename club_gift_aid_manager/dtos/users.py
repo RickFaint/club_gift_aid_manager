@@ -24,10 +24,13 @@ class UserUpdateDTO(DTO):
     is_active: bool | None = None
 
 
-class UserImportDTO(UserCreateDTO):
+class UserImportDTO(DTO):
     """Allow invitation-based provisioning without a password column."""
 
+    username: str = Field(min_length=1, max_length=256)
     password: str | None = Field(default=None, min_length=15, max_length=1024)
+    role: Literal["admin", "treasurer", "volunteer"]
+    person_id: int | None = Field(default=None, gt=0)
 
 
 class UserPasswordResetDTO(DTO):

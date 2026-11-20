@@ -3,6 +3,7 @@
 {% block content %}
 <div class="page-heading">
   <div><h1>Financial and mileage report</h1><p>Club-wide totals and a per-volunteer activity summary.</p></div>
+  <a class="btn btn-outline-primary" href="{{ url_for('reports.reports_all_csv') }}">Export all tables and reports</a>
 </div>
 <section class="row g-3 mb-4" aria-label="Club-wide financial totals">
   <div class="col-sm-6 col-xl-3"><div class="card metric-card h-100"><div class="card-body"><div class="metric-label">Expenses paid</div><div class="metric-value" id="report-expenses-paid">&mdash;</div><div class="metric-note">Recorded reimbursement payments</div></div></div></div>

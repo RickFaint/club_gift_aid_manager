@@ -118,7 +118,9 @@ def _people_import_now():
         reader.fieldnames = headers
     except (UnicodeDecodeError, csv.Error):
         return jsonify(
-            {"error": "The CSV file could not be read. Use UTF-8 encoding and valid CSV formatting."}
+            {
+                "error": "The CSV file could not be read. Use UTF-8 encoding and valid CSV formatting."
+            }
         ), 400
 
     allowed_fields = {"name", "email", "phone", "role", "active", "notes"}

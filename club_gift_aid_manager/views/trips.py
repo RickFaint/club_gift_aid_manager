@@ -209,7 +209,8 @@ def _create_trip(payload):
     idempotency_key = request.headers.get("Idempotency-Key") or payload.pop("_idempotency_key", "")
     request_token = (
         hashlib.sha256(f"{g.current_user['id']}:{idempotency_key}".encode()).hexdigest()
-        if 16 <= len(idempotency_key) <= 200 else None
+        if 16 <= len(idempotency_key) <= 200
+        else None
     )
     required = ["trip_date", "vehicle_type", "origin_id", "destination_id"]
     if g.current_user["role"] == Role.ADMIN.value:
@@ -410,7 +411,9 @@ def _trips_import_now():
                 origin_id = int((row.get("origin_id") or "").strip())
                 destination_id = int((row.get("destination_id") or "").strip())
                 passengers = int((row.get("passengers") or "0").strip())
-                if not all(0 < value <= 2**63 - 1 for value in (person_id, origin_id, destination_id)):
+                if not all(
+                    0 < value <= 2**63 - 1 for value in (person_id, origin_id, destination_id)
+                ):
                     raise ValueError("Invalid person or location ID.")
             except (TypeError, ValueError) as exc:
                 message = str(exc)
@@ -637,12 +640,23 @@ def trips_update(trip_id: int):
     if existing["payment_id"]:
         return jsonify({"error": "A paid trip is locked. Record a correction note instead."}), 409
     unsupported = set(payload) - {
-        "person_id", "origin_id", "destination_id", "vehicle_type", "trip_date", "miles_one_way",
-        "return_trip", "passengers", "status",
+        "person_id",
+        "origin_id",
+        "destination_id",
+        "vehicle_type",
+        "trip_date",
+        "miles_one_way",
+        "return_trip",
+        "passengers",
+        "status",
     }
     if unsupported:
         return jsonify({"error": "The request contains fields that cannot be edited."}), 400
-    if "vehicle_type" in payload and payload["vehicle_type"] not in ("car", "motorcycle", "bicycle"):
+    if "vehicle_type" in payload and payload["vehicle_type"] not in (
+        "car",
+        "motorcycle",
+        "bicycle",
+    ):
         return jsonify({"error": "Vehicle type must be car, motorcycle, or bicycle."}), 400
     if "status" in payload and payload["status"] not in ("submitted", "approved", "rejected"):
         return jsonify({"error": "Status must be submitted, approved, or rejected."}), 400

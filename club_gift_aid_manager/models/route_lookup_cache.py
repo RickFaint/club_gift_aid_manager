@@ -14,9 +14,7 @@ class RouteLookupCache(Base):
 
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     origin_id: Mapped[int] = mapped_column(ForeignKey("destinations.id", ondelete="CASCADE"))
-    destination_id: Mapped[int] = mapped_column(
-        ForeignKey("destinations.id", ondelete="CASCADE")
-    )
+    destination_id: Mapped[int] = mapped_column(ForeignKey("destinations.id", ondelete="CASCADE"))
     origin_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     destination_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     distance_miles: Mapped[str] = mapped_column(EncryptedText, nullable=False)

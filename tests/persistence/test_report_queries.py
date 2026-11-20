@@ -1,5 +1,6 @@
 """Query and decryption budgets for aggregate financial read models."""
 
+import base64
 from datetime import date
 
 from sqlalchemy import event
@@ -64,6 +65,65 @@ def test_financial_report_uses_one_projected_metric_stream(monkeypatch):
     assert decryptions == 5  # one volunteer name plus four active metric values
     assert report["totals"]["expenses_paid_pence"] == 4000
     assert report["totals"]["donations_pence"] == 2000
+
+
+def test_complete_financial_report_query_count_is_constant_per_volunteer():
+    """Outstanding expense calculation batches trips instead of querying per person."""
+    for index in range(4):
+        person = db.create_person(name=f"Batch report volunteer {index}", role="volunteer")
+        db.create_trip(
+            person_id=person["id"],
+            trip_date=date(2026, 6, index + 1),
+            vehicle_type="car",
+            miles_one_way=5,
+            return_trip=True,
+            declaration_text="I declare this trip was for club business.",
+        )
+
+    statements = []
+    engine = database.get_engine()
+
+    def capture(*args):
+        statements.append(args[2])
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        report = db.get_financial_report()
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert len(statements) == 5
+    assert len(report["volunteers"]) == 4
+    assert report["totals"]["expenses_outstanding_pence"] == 1800
+
+
+def test_declaration_listing_does_not_load_deferred_evidence():
+    """The persisted presence flag avoids an image query and decryption per row."""
+    image = base64.b64encode(b"encrypted-at-rest evidence marker").decode("ascii")
+    for index in range(3):
+        person = db.create_person(name=f"Declaration query donor {index}")
+        db.create_declaration(
+            person_id=person["id"],
+            full_name=person["name"],
+            evidence_image_base64=image,
+            evidence_image_mime="image/png",
+        )
+
+    statements = []
+    engine = database.get_engine()
+
+    def capture(*args):
+        statements.append(args[2])
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        declarations = db.list_declarations()
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert len(statements) == 2
+    assert all("evidence_image_base64" not in statement for statement in statements)
+    assert all(item["has_evidence_image"] for item in declarations)
 
 
 def test_summary_counts_and_amounts_use_two_queries(monkeypatch):

@@ -28,8 +28,13 @@ class PersonCreateDTO(DTO):
     @field_validator("phone")
     @classmethod
     def validate_phone_digits(cls, value: str | None) -> str | None:
-        """Keep optional phone identifiers as strings but accept digits only."""
-        if value is not None and not value.isdigit():
+        """Keep optional telephone identifiers as strings but accept digits only.
+
+        A string preserves leading zeroes, which an integer column/value would
+        discard.  ``None`` represents an omitted optional field; an entered value
+        must pass ``str.isdigit`` before it can reach the SQLAlchemy model.
+        """
+        if value is not None and not (value.isascii() and value.isdigit()):
             raise ValueError("must contain numbers only")
         return value
 
@@ -57,3 +62,9 @@ class PersonDTO(PersonCreateDTO):
     """Add the database identity to the validated person fields returned by APIs."""
 
     id: int
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone_digits(cls, value: str | None) -> str | None:
+        """Permit display of legacy formatted numbers while new writes stay strict."""
+        return value

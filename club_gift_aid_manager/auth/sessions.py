@@ -94,6 +94,4 @@ def revoke_authenticated_session() -> None:
     if not isinstance(session_id, str) or not session_id:
         return
     with unit_of_work() as database_session:
-        database_session.execute(
-            delete(AuthSession).where(AuthSession.id == _digest(session_id))
-        )
+        database_session.execute(delete(AuthSession).where(AuthSession.id == _digest(session_id)))

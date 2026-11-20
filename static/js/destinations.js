@@ -27,7 +27,15 @@ function renderDestinations(total) {
     : '<tr><td colspan="7" class="empty-state">No locations found. Add a location to get started.</td></tr>';
 }
 
-/** Populate trip origin/destination controls and choose the configured home ground. */
+/**
+ * Populate searchable trip endpoints and choose the configured home ground.
+ *
+ * The visible datalist gives type-ahead suggestions across name, town, and postcode.
+ * A hidden select remains the authoritative form control because the rest of the trip
+ * code and API work with stable numeric destination IDs, not mutable display labels.
+ * `connectSearch` resolves an exact displayed label back to its ID and rejects arbitrary
+ * text that does not identify one of the server-provided active locations.
+ */
 
 function fillDestinationSelect() {
   const active = state.destinations.filter((destination) => destination.active);
